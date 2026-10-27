@@ -93,12 +93,12 @@ jobs:
       - name: Run Unit Tests & Assemble Release + Debug APKs
         run: |
           set +e
-          ./gradlew testDebugUnitTest assembleRelease assembleDebug --no-daemon --stacktrace > gradle_build.log 2>&1
+          ./gradlew testDebugUnitTest assembleRelease assembleDebug --no-daemon > gradle_build.log 2>&1
           RC=$?
           cat gradle_build.log
           if [[ "$RC" -ne 0 ]]; then
-            ERR_SUMMARY="$(grep -E '(^e: |FAILURE:|^\* What went wrong:|^  > |Exception:|Error:)' gradle_build.log | head -n 45 | sed 's/%/%25/g; s/\r/%0D/g' | paste -sd '|' - | sed 's/|/%0A/g')"
-            TAIL_SUMMARY="$(tail -n 60 gradle_build.log | sed 's/%/%25/g; s/\r/%0D/g' | paste -sd '|' - | sed 's/|/%0A/g')"
+            ERR_SUMMARY="$(grep -E '(^e: |FAILURE:|^\* What went wrong:|^  > |Exception:|Error:|FAILED)' gradle_build.log | head -n 45 | sed 's/%/%25/g; s/\r/%0D/g' | paste -sd '|' - | sed 's/|/%0A/g')"
+            TAIL_SUMMARY="$(tail -n 55 gradle_build.log | sed 's/%/%25/g; s/\r/%0D/g' | paste -sd '|' - | sed 's/|/%0A/g')"
             echo "::error title=GradleErrorSummary::${ERR_SUMMARY}"
             echo "::error title=GradleLogTail::${TAIL_SUMMARY}"
             exit "$RC"

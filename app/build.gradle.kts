@@ -31,6 +31,10 @@ android {
     }
 
     signingConfigs {
+        getByName("debug") {
+            enableV1Signing = true
+            enableV2Signing = true
+        }
         create("release") {
             if (keystorePropsFile.exists()) {
                 storeFile = rootProject.file(keystoreProps.getProperty("storeFile"))
@@ -49,8 +53,6 @@ android {
         debug {
             applicationIdSuffix = ".debug"
             versionNameSuffix = "-debug"
-            enableV1Signing = true
-            enableV2Signing = true
         }
         release {
             // Keep JNI classes for Cronet (GEN_JNI) and gomobile IEnvoyProxy intact
