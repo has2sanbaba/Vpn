@@ -54,7 +54,7 @@ object CronetNetworking {
                 .enableHttp2(true)
                 .enableQuic(true)
                 .setStoragePath(cacheDir.absolutePath)
-                .enableHttpCache(CronetEngine.Builder.HTTP_CACHE_DISK_NO_ARCHIVE, 16L * 1024L * 1024L)
+                .enableHttpCache(CronetEngine.Builder.HTTP_CACHE_DISK, 16L * 1024L * 1024L)
 
             if (!envoyUrl.isNullOrBlank()) {
                 builder = builder.setEnvoyUrl(envoyUrl)
