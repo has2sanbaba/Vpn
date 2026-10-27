@@ -32,7 +32,7 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Set up JDK 17 (Temurin)
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: "17"
@@ -48,10 +48,11 @@ jobs:
         working-directory: native/gfproxy
         run: go test -v -race ./...
 
-      - name: Ensure Android NDK with API 21 Toolchain
+      - name: Ensure Android SDK Licenses & NDK with API 21 Toolchain
         run: |
           set -euo pipefail
           SDK_ROOT="${ANDROID_HOME:-/usr/local/lib/android/sdk}"
+          yes | "$SDK_ROOT/cmdline-tools/latest/bin/sdkmanager" --licenses >/dev/null 2>&1 || true
           FOUND_NDK=""
           if [[ -d "$SDK_ROOT/ndk" ]]; then
             for d in $(ls -1d "$SDK_ROOT"/ndk/* 2>/dev/null | sort -Vr); do
@@ -90,7 +91,19 @@ jobs:
         run: ./scripts/ensure-keystore.sh
 
       - name: Run Unit Tests & Assemble Release + Debug APKs
-        run: ./gradlew testDebugUnitTest assembleRelease assembleDebug --no-daemon --stacktrace
+        run: |
+          set +e
+          ./gradlew testDebugUnitTest assembleRelease assembleDebug --no-daemon --stacktrace > gradle_build.log 2>&1
+          RC=$?
+          cat gradle_build.log
+          if [[ "$RC" -ne 0 ]]; then
+            ERR_SUMMARY="$(grep -E '(^e: |FAILURE:|^\* What went wrong:|^  > |Exception:|Error:)' gradle_build.log | head -n 45 | sed 's/%/%25/g; s/\r/%0D/g' | paste -sd '|' - | sed 's/|/%0A/g')"
+            TAIL_SUMMARY="$(tail -n 60 gradle_build.log | sed 's/%/%25/g; s/\r/%0D/g' | paste -sd '|' - | sed 's/|/%0A/g')"
+            echo "::error title=GradleErrorSummary::${ERR_SUMMARY}"
+            echo "::error title=GradleLogTail::${TAIL_SUMMARY}"
+            exit "$RC"
+          fi
+          set -e
 
       - name: Verify All 4 CPU Architectures, Native Engines, and API 21 Signatures
         run: |
@@ -129,6 +142,8 @@ jobs:
           echo "$BADGING" | grep -E "package:|sdkVersion:|targetSdkVersion:|native-code:"
 
           (cd dist && sha256sum *.apk > SHA256SUMS.txt)
+          NOTICE_BODY="$(ls -lh dist/*.apk | awk '{print $9 ": " $5}' | paste -sd '|' - | sed 's/|/%0A/g')"
+          echo "::notice title=BuiltAPKs::${NOTICE_BODY}"
 
           {
             echo "## 🛡️ GreatFire VPN Browser — Build Verification Summary"

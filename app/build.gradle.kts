@@ -156,7 +156,8 @@ dependencies {
     // GreatFire Official Android Libraries:
     // 1. cronet-108.0.5359.195.aar (Patched Chromium Cronet + Envoy + Geneva + ECH + gfw-report/shadowsocks-rust)
     // 2. IEnvoyProxy.aar e3.5.0 (V2Ray, XRay, Hysteria2, Snowflake, Lyrebird Obfs4/Meek/WebTunnel, MASQUE, ECH, DoH)
-    implementation(fileTree(mapOf("dir" to "libs", "include" to listOf("*.aar", "*.jar"))))
+    implementation(files("libs/cronet-108.0.5359.195.aar"))
+    implementation(files("libs/IEnvoyProxy.aar"))
 
     implementation(platform("org.jetbrains.kotlin:kotlin-bom:2.1.20"))
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.9.0")
