@@ -1,0 +1,181 @@
+name: Build GreatFire VPN Browser (All Androids & All CPUs)
+
+on:
+  push:
+    branches:
+      - "**"
+    tags:
+      - "v*"
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      publish_release:
+        description: "Publish APKs to GitHub Releases"
+        required: false
+        default: "false"
+        type: choice
+        options:
+          - "false"
+          - "true"
+
+permissions:
+  contents: write
+
+jobs:
+  build-android:
+    name: Build & Verify Multi-Arch Android APKs (API 21–35+)
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17 (Temurin)
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+          cache: gradle
+
+      - name: Set up Go 1.22
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.22"
+          cache: false
+
+      - name: Test Native GreatFire Anti-DPI & Unified Gateway Engine (Go)
+        working-directory: native/gfproxy
+        run: go test -v -race ./...
+
+      - name: Ensure Android NDK with API 21 Toolchain
+        run: |
+          set -euo pipefail
+          SDK_ROOT="${ANDROID_HOME:-/usr/local/lib/android/sdk}"
+          FOUND_NDK=""
+          if [[ -d "$SDK_ROOT/ndk" ]]; then
+            for d in $(ls -1d "$SDK_ROOT"/ndk/* 2>/dev/null | sort -Vr); do
+              if [[ -x "$d/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android21-clang" ]]; then
+                FOUND_NDK="$d"
+                break
+              fi
+            done
+          fi
+          if [[ -z "$FOUND_NDK" ]]; then
+            echo "Installing Android NDK 27.2.12479018 (includes API 21 Clang + 16KB page support)..."
+            yes | "$SDK_ROOT/cmdline-tools/latest/bin/sdkmanager" --install "ndk;27.2.12479018" >/dev/null
+            FOUND_NDK="$SDK_ROOT/ndk/27.2.12479018"
+          fi
+          echo "ANDROID_NDK_HOME=$FOUND_NDK" >> "$GITHUB_ENV"
+          echo "Using ANDROID_NDK_HOME=$FOUND_NDK"
+
+      - name: Cache GreatFire Official AARs (Envoy Cronet + IEnvoyProxy)
+        uses: actions/cache@v4
+        with:
+          path: app/libs
+          key: greatfire-aars-cronet108-ienvoy350-v1
+
+      - name: Fetch GreatFire Envoy Cronet & IEnvoyProxy AARs
+        run: ./scripts/fetch-greatfire-libs.sh
+
+      - name: Cross-Compile libgfproxy.so for armeabi-v7a, arm64-v8a, x86, x86_64
+        run: ./scripts/build-gfproxy-android.sh
+
+      - name: Prepare V1 + V2 + V3 Release Signing Keystore
+        env:
+          KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+        run: ./scripts/ensure-keystore.sh
+
+      - name: Run Unit Tests & Assemble Release + Debug APKs
+        run: ./gradlew testDebugUnitTest assembleRelease assembleDebug --no-daemon --stacktrace
+
+      - name: Verify All 4 CPU Architectures, Native Engines, and API 21 Signatures
+        run: |
+          set -euo pipefail
+          SDK_ROOT="${ANDROID_HOME:-/usr/local/lib/android/sdk}"
+          APKSIGNER="$(find "$SDK_ROOT/build-tools" -name apksigner | sort -V | tail -n 1)"
+          AAPT2="$(find "$SDK_ROOT/build-tools" -name aapt2 | sort -V | tail -n 1)"
+
+          REL_DIR="app/build/outputs/apk/release"
+          mkdir -p dist
+
+          cp "$REL_DIR/app-universal-release.apk"   "dist/GreatFire-VPN-Browser-universal-release.apk"
+          cp "$REL_DIR/app-arm64-v8a-release.apk"   "dist/GreatFire-VPN-Browser-arm64-v8a-release.apk"
+          cp "$REL_DIR/app-armeabi-v7a-release.apk" "dist/GreatFire-VPN-Browser-armeabi-v7a-release.apk"
+          cp "$REL_DIR/app-x86_64-release.apk"      "dist/GreatFire-VPN-Browser-x86_64-release.apk"
+          cp "$REL_DIR/app-x86-release.apk"         "dist/GreatFire-VPN-Browser-x86-release.apk"
+
+          UNIV="dist/GreatFire-VPN-Browser-universal-release.apk"
+          ZIP_LIST="$(unzip -l "$UNIV")"
+
+          for abi in armeabi-v7a arm64-v8a x86 x86_64; do
+            for lib in libcronet.108.0.5359.195.so libgojni.so libsslocal.so libgfproxy.so; do
+              echo "$ZIP_LIST" | grep -q "lib/$abi/$lib" || {
+                echo "MISSING native library: lib/$abi/$lib in Universal APK!" >&2
+                exit 1
+              }
+            done
+          done
+          echo "Verified all 16 native .so libraries (4 engines x 4 CPU ABIs) inside Universal APK!"
+
+          for apk in dist/*.apk; do
+            "$APKSIGNER" verify --verbose --min-sdk-version 21 "$apk"
+          done
+
+          BADGING="$("$AAPT2" dump badging "$UNIV")"
+          echo "$BADGING" | grep -E "package:|sdkVersion:|targetSdkVersion:|native-code:"
+
+          (cd dist && sha256sum *.apk > SHA256SUMS.txt)
+
+          {
+            echo "## 🛡️ GreatFire VPN Browser — Build Verification Summary"
+            echo ""
+            echo "- **Supported Android Versions:** Android 5.0 Lollipop (\`API 21\`) → Android 16 (\`API 35+\`)"
+            echo "- **Supported CPU Architectures:** \`arm64-v8a\`, \`armeabi-v7a\`, \`x86_64\`, \`x86\` + \`universal\`"
+            echo "- **Bundled GreatFire Engines:** \`Envoy Cronet + Geneva\`, \`IEnvoyProxy (V2Ray/XRay/Hysteria2/Snowflake/MASQUE/ECH/Obfs4/Meek)\`, \`Shadowsocks-Rust\`, \`gfproxy (FreeBrowser DoH + TLS ClientHello Fragmentation)\`"
+            echo "- **APK Signatures:** V1 (JAR) + V2 + V3 verified for \`minSdkVersion=21\`"
+            echo ""
+            echo "### 📦 Ready-to-Install Release APKs"
+            echo "| File | Size | SHA-256 |"
+            echo "|---|---|---|"
+            for f in dist/*.apk; do
+              bn="$(basename "$f")"
+              sz="$(du -h "$f" | cut -f1)"
+              sh="$(sha256sum "$f" | cut -d' ' -f1)"
+              echo "| \`$bn\` | $sz | \`$sh\` |"
+            done
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload Signed Release APKs Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: GreatFire-VPN-Browser-APKs
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: Upload Debug Universal APK Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: GreatFire-VPN-Browser-Debug-APK
+          path: app/build/outputs/apk/debug/app-universal-debug.apk
+          if-no-files-found: warn
+          retention-days: 30
+
+      - name: Publish GitHub Release (Tags or Manual Dispatch)
+        if: startsWith(github.ref, 'refs/tags/v') || github.event.inputs.publish_release == 'true'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || format('v1.0.0-build.{0}', github.run_number) }}
+          name: "GreatFire VPN Browser (${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || format('Build #{0}', github.run_number) }})"
+          generate_release_notes: true
+          files: |
+            dist/GreatFire-VPN-Browser-universal-release.apk
+            dist/GreatFire-VPN-Browser-arm64-v8a-release.apk
+            dist/GreatFire-VPN-Browser-armeabi-v7a-release.apk
+            dist/GreatFire-VPN-Browser-x86_64-release.apk
+            dist/GreatFire-VPN-Browser-x86-release.apk
+            dist/SHA256SUMS.txt
