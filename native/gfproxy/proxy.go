@@ -160,7 +160,7 @@ func (g *GatewayServer) handleSOCKS5(client net.Conn, br *bufio.Reader) {
 	}
 	port := strconv.Itoa(int(binary.BigEndian.Uint16(portBytes[:])))
 
-	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 35*time.Second)
 	remote, err := g.router.DialTarget(ctx, host, port)
 	cancel()
 	if err != nil {
@@ -194,7 +194,7 @@ func (g *GatewayServer) handleHTTP(client net.Conn, br *bufio.Reader) {
 			port = "443"
 		}
 
-		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+		ctx, cancel := context.WithTimeout(context.Background(), 35*time.Second)
 		remote, dialErr := g.router.DialTarget(ctx, host, port)
 		cancel()
 		if dialErr != nil {
@@ -371,8 +371,14 @@ func NewControlMux(gw *GatewayServer, router *UpstreamRouter, doh *DoHResolver, 
 		}
 		target := r.URL.Query().Get("url")
 		if target == "" {
-			target = "https://www.google.com/generate_204"
+			// Probe a genuinely censored target (YouTube 204 endpoint), NEVER uncensored google.com!
+			target = "https://www.youtube.com/generate_204"
 		}
+		timeoutMs, _ := strconv.Atoi(r.URL.Query().Get("timeout_ms"))
+		if timeoutMs < 2000 || timeoutMs > 30000 {
+			timeoutMs = 12000
+		}
+
 		u, err := url.Parse(target)
 		if err != nil || (u.Scheme != "https" && u.Scheme != "http") {
 			w.WriteHeader(http.StatusBadRequest)
@@ -381,7 +387,8 @@ func NewControlMux(gw *GatewayServer, router *UpstreamRouter, doh *DoHResolver, 
 		}
 
 		start := time.Now()
-		ctx, cancel := context.WithTimeout(r.Context(), 12*time.Second)
+		timeoutDur := time.Duration(timeoutMs) * time.Millisecond
+		ctx, cancel := context.WithTimeout(r.Context(), timeoutDur)
 		defer cancel()
 
 		cfg := router.GetConfig()
@@ -407,6 +414,7 @@ func NewControlMux(gw *GatewayServer, router *UpstreamRouter, doh *DoHResolver, 
 				}
 				tlsConn := tls.Client(raw, &tls.Config{
 					ServerName: h,
+					RootCAs:    AndroidRootCertPool(),
 					NextProtos: []string{"h2", "http/1.1"},
 					MinVersion: tls.VersionTLS12,
 				})
@@ -419,7 +427,7 @@ func NewControlMux(gw *GatewayServer, router *UpstreamRouter, doh *DoHResolver, 
 		}
 		defer tr.CloseIdleConnections()
 
-		client := &http.Client{Transport: tr, Timeout: 12 * time.Second}
+		client := &http.Client{Transport: tr, Timeout: timeoutDur}
 		req, _ := http.NewRequestWithContext(ctx, http.MethodGet, target, nil)
 		req.Header.Set("User-Agent", "Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 Chrome/128.0.0.0 Mobile Safari/537.36")
 

@@ -34,16 +34,19 @@ func TestDNSWireQueryAndPoisonFilter(t *testing.T) {
 		t.Fatalf("txID mismatch")
 	}
 
-	// Verify Iranian censorship sinkhole IPs & RFC1918 are rejected
-	for _, bad := range []string{"10.10.34.34", "10.10.34.35", "10.10.34.36", "127.0.0.1", "0.0.0.0", "192.168.1.1"} {
+	// Verify Iranian censorship sinkhole IPs, CGNAT block pages, FakeIP, & RFC1918 are rejected
+	for _, bad := range []string{"10.10.34.34", "10.10.34.35", "10.10.34.36", "100.64.0.1", "198.18.0.1", "127.0.0.1", "0.0.0.0", "192.168.1.1"} {
 		if !IsPoisonedOrBogonIP(net.ParseIP(bad)) {
 			t.Errorf("expected %s to be detected as poisoned/bogon", bad)
 		}
 	}
-	for _, good := range []string{"142.250.185.206", "1.1.1.1", "104.16.132.229"} {
+	for _, good := range []string{"142.250.185.206", "1.1.1.1", "104.16.132.229", "8.8.8.8", "9.9.9.11"} {
 		if IsPoisonedOrBogonIP(net.ParseIP(good)) {
 			t.Errorf("expected %s to be accepted as clean public IP", good)
 		}
+	}
+	if AndroidRootCertPool() == nil {
+		t.Fatalf("expected non-nil AndroidRootCertPool")
 	}
 }
 

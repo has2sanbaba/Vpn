@@ -6,21 +6,30 @@ import java.net.URLDecoder
 import java.util.UUID
 
 enum class TransportKind(val badge: String) {
-    SMART_AUTO("Smart Auto • Envoy + Anti-DPI"),
+    SMART_AUTO("Smart Auto • اتصال تضمینی چندموتوره"),
+    WARP_CLEAN_SCAN("WARP+ Clean IP • اسکن آی‌پی تمیز"),
+    WARP_IN_WARP_GOOL("WARP-in-WARP (Gool) • تونل دو لایه"),
+    WARP_PSIPHON_CFON("Psiphon + WARP • آی‌پی اروپا (CFON)"),
+    TOR_MEEK_BRIDGE("Tor + GreatFire Meek • CDN77 HTTPS"),
+    SNOWFLAKE("Tor + GreatFire Snowflake • WebRTC"),
+    TOR_OBFS4_BRIDGE("Tor + GreatFire Obfs4 • Lyrebird"),
+    VLESS("Sing-Box • VLESS (Reality / WS / gRPC)"),
+    TROJAN("Sing-Box • Trojan TLS"),
+    TUIC("Sing-Box • TUIC v5 QUIC"),
+    WIREGUARD("Sing-Box • WireGuard"),
     FREEBROWSER_ANTI_DPI("FreeBrowser • DoH + TLS Fragment"),
     CRONET_GENEVA("Envoy Cronet • Geneva Evasion"),
-    SNOWFLAKE("Tor Snowflake • WebRTC"),
-    V2RAY_WS("IEnvoyProxy • V2Ray WS"),
-    V2RAY_HTTP("IEnvoyProxy • V2Ray HTTP"),
+    V2RAY_WS("Sing-Box / IEnvoyProxy • VMess WS"),
+    V2RAY_HTTP("Sing-Box / IEnvoyProxy • VMess HTTP"),
     V2RAY_SRTP("IEnvoyProxy • V2Ray SRTP"),
     V2RAY_WECHAT("IEnvoyProxy • V2Ray WeChat"),
     XRAY_XHTTP("IEnvoyProxy • XRay XHTTP"),
-    HYSTERIA2("IEnvoyProxy • Hysteria2 QUIC"),
-    SHADOWSOCKS("Envoy • Shadowsocks Rust"),
+    HYSTERIA2("Sing-Box / IEnvoyProxy • Hysteria2 QUIC"),
+    SHADOWSOCKS("Envoy / Sing-Box • Shadowsocks"),
     ENVOY_URL("GreatFire • Envoy HTTPS"),
     ENVOY_ECH("IEnvoyProxy • Envoy ECH"),
     MASQUE("IEnvoyProxy • MASQUE"),
-    LYREBIRD_PT("IEnvoyProxy • Pluggable Transport"),
+    LYREBIRD_PT("Tor + IEnvoyProxy • Pluggable Transport"),
     SOCKS5("SOCKS5 Tunnel"),
     HTTP_PROXY("HTTP CONNECT Proxy")
 }
@@ -126,7 +135,6 @@ object ProxyProfileParser {
         val trimmed = input.trim()
         if (trimmed.isEmpty()) return emptyList()
 
-        // If entire payload is base64-encoded subscription text, decode first
         val expanded = if (!trimmed.contains("://") && looksLikeBase64Block(trimmed)) {
             decodeBase64Utf8(trimmed) ?: trimmed
         } else {
@@ -152,11 +160,14 @@ object ProxyProfileParser {
         if (scheme.isEmpty()) return null
 
         return when (scheme) {
+            "vless", "xray+xhttp" -> parseVlessOrXray(raw, scheme, customName)
             "vmess" -> parseVmess(raw, customName)
-            "vless", "xray+xhttp" -> parseVlessOrXray(raw, customName)
-            "v2ws", "v2http", "v2srtp", "v2wechat" -> parseGreatFireV2Ray(raw, scheme, customName)
-            "ss" -> parseShadowsocks(raw, customName)
+            "trojan" -> parseTrojan(raw, customName)
+            "tuic" -> parseTuic(raw, customName)
             "hysteria2", "hy2" -> parseHysteria2(raw, customName)
+            "ss" -> parseShadowsocks(raw, customName)
+            "wireguard", "wg" -> parseWireGuard(raw, customName)
+            "v2ws", "v2http", "v2srtp", "v2wechat" -> parseGreatFireV2Ray(raw, scheme, customName)
             "envoy", "envoy+https" -> parseEnvoyUrl(raw, customName)
             "ech+https", "envoy+ech" -> parseEnvoyEch(raw, customName)
             "masque" -> parseMasque(raw, customName)
@@ -184,8 +195,12 @@ object ProxyProfileParser {
         val netType = obj.optString("net", "ws").lowercase()
         val path = obj.optString("path", "/")
         val hostHeader = obj.optString("host", "")
+        val tlsField = obj.optString("tls", "").lowercase()
         val sni = obj.optString("sni", hostHeader.ifBlank { host })
         val fp = obj.optString("fp", "chrome")
+        val aid = obj.optString("aid", "0")
+        val scy = obj.optString("scy", "auto")
+        val alpn = obj.optString("alpn", "")
         val ps = customName.ifBlank { obj.optString("ps").ifBlank { "VMess $host:$port" } }
 
         val kind = if (netType == "http" || netType == "h2") {
@@ -204,30 +219,55 @@ object ProxyProfileParser {
             path = path.ifBlank { "/" },
             sni = sni,
             frontHost = hostHeader,
-            utlsFingerprint = fp.ifBlank { "chrome" }
+            utlsFingerprint = fp.ifBlank { "chrome" },
+            extra = mapOf(
+                "type" to netType,
+                "tls" to tlsField,
+                "aid" to aid,
+                "scy" to scy,
+                "alpn" to alpn,
+                "serviceName" to path
+            )
         )
     }.getOrNull()
 
-    private fun parseVlessOrXray(raw: String, customName: String): ProxyProfile? = runCatching {
-        val normalized = if (raw.startsWith("xray+xhttp://", true)) {
+    private fun parseVlessOrXray(raw: String, scheme: String, customName: String): ProxyProfile? = runCatching {
+        val normalized = if (scheme == "xray+xhttp") {
             "vless://" + raw.substringAfter("://")
         } else raw
-        val uri = URI(normalized)
-        val uuid = uri.userInfo?.trim().orEmpty()
-        val host = uri.host?.trim().orEmpty()
+        val uri = parseFlexibleUri(normalized) ?: return null
+        val uuid = urlDecode(uri.userInfo).trim()
+        val host = uri.host.trim()
         val port = if (uri.port > 0) uri.port else 443
-        if (uuid.isEmpty() || host.isEmpty()) return null
+        if (uuid.isEmpty() || host.isEmpty() || port !in 1..65535) return null
 
-        val params = parseQueryMap(uri.rawQuery)
-        val type = params["type"]?.lowercase().orEmpty()
-        val path = params["path"] ?: "/"
-        val sni = params["sni"] ?: params["servername"] ?: host
+        val params = parseQueryMapCaseInsensitive(uri.rawQuery)
+        val netType = (params["type"] ?: if (scheme == "xray+xhttp") "xhttp" else "tcp").lowercase()
+        val security = (params["security"] ?: if (port == 443 && scheme == "xray+xhttp") "tls" else "none").lowercase()
+        val rawPath = params["path"] ?: "/"
+        val sni = params["sni"] ?: params["servername"] ?: params["host"] ?: host
         val hostHdr = params["host"].orEmpty()
-        val allowInsecure = params["allowinsecure"] == "1" || params["allowinsecure"] == "true"
-        val fragName = uri.rawFragment?.let { urlDecode(it) }.orEmpty()
-        val name = customName.ifBlank { fragName.ifBlank { "XRay/VLESS $host:$port" } }
+        val allowInsecure = params["allowinsecure"] == "1" || params["allowinsecure"] == "true" || params["insecure"] == "1"
+        val fragName = uri.fragment
+        val kind = if (scheme == "xray+xhttp" || netType == "xhttp" || netType == "splithttp") {
+            TransportKind.XRAY_XHTTP
+        } else {
+            TransportKind.VLESS
+        }
 
-        val kind = if (type == "ws") TransportKind.V2RAY_WS else TransportKind.XRAY_XHTTP
+        val defaultTag = if (security == "reality") "VLESS-Reality $host:$port" else "VLESS $host:$port"
+        val name = customName.ifBlank { fragName.ifBlank { defaultTag } }
+
+        val extra = mutableMapOf(
+            "type" to netType,
+            "security" to security
+        )
+        params["pbk"]?.let { extra["pbk"] = it }
+        params["sid"]?.let { extra["sid"] = it }
+        params["spx"]?.let { extra["spx"] = it }
+        params["flow"]?.let { extra["flow"] = it }
+        params["servicename"]?.let { extra["serviceName"] = it }
+        params["alpn"]?.let { extra["alpn"] = it }
 
         ProxyProfile(
             name = name,
@@ -236,20 +276,116 @@ object ProxyProfileParser {
             host = host,
             port = port,
             uuid = uuid,
-            path = if (path.startsWith('/')) path else "/$path",
+            path = if (rawPath.startsWith('/')) rawPath else "/$rawPath",
             sni = sni,
             frontHost = hostHdr,
             allowInsecure = allowInsecure,
-            utlsFingerprint = params["fp"] ?: "chrome"
+            utlsFingerprint = params["fp"]?.ifBlank { null } ?: "chrome",
+            extra = extra
+        )
+    }.getOrNull()
+
+    private fun parseTrojan(raw: String, customName: String): ProxyProfile? = runCatching {
+        val uri = parseFlexibleUri(raw) ?: return null
+        val password = urlDecode(uri.userInfo)
+        val host = uri.host.trim()
+        val port = if (uri.port > 0) uri.port else 443
+        if (password.isEmpty() || host.isEmpty() || port !in 1..65535) return null
+
+        val params = parseQueryMapCaseInsensitive(uri.rawQuery)
+        val netType = (params["type"] ?: "tcp").lowercase()
+        val security = (params["security"] ?: "tls").lowercase()
+        val rawPath = params["path"] ?: "/"
+        val hostHdr = params["host"].orEmpty()
+        val sni = params["sni"] ?: params["peer"] ?: hostHdr.ifBlank { host }
+        val allowInsecure = params["allowinsecure"] == "1" || params["allowinsecure"] == "true" || params["insecure"] == "1"
+        val name = customName.ifBlank { uri.fragment.ifBlank { "Trojan $host:$port" } }
+
+        val extra = mutableMapOf(
+            "type" to netType,
+            "security" to security
+        )
+        params["pbk"]?.let { extra["pbk"] = it }
+        params["sid"]?.let { extra["sid"] = it }
+        params["servicename"]?.let { extra["serviceName"] = it }
+        params["alpn"]?.let { extra["alpn"] = it }
+
+        ProxyProfile(
+            name = name,
+            kind = TransportKind.TROJAN,
+            rawUri = raw,
+            host = host,
+            port = port,
+            password = password,
+            path = if (rawPath.startsWith('/')) rawPath else "/$rawPath",
+            sni = sni,
+            frontHost = hostHdr,
+            allowInsecure = allowInsecure,
+            utlsFingerprint = params["fp"]?.ifBlank { null } ?: "chrome",
+            extra = extra
+        )
+    }.getOrNull()
+
+    private fun parseTuic(raw: String, customName: String): ProxyProfile? = runCatching {
+        val uri = parseFlexibleUri(raw) ?: return null
+        val host = uri.host.trim()
+        val port = if (uri.port > 0) uri.port else 443
+        if (host.isEmpty() || port !in 1..65535) return null
+
+        val userInfo = uri.userInfo
+        val uuid = urlDecode(userInfo.substringBefore(':'))
+        val password = if (userInfo.contains(':')) urlDecode(userInfo.substringAfter(':')) else ""
+        if (uuid.isEmpty()) return null
+
+        val params = parseQueryMapCaseInsensitive(uri.rawQuery)
+        val sni = params["sni"] ?: host
+        val allowInsecure = params["allow_insecure"] == "1" || params["insecure"] == "1" || params["allowinsecure"] == "true"
+        val name = customName.ifBlank { uri.fragment.ifBlank { "TUIC $host:$port" } }
+
+        ProxyProfile(
+            name = name,
+            kind = TransportKind.TUIC,
+            rawUri = raw,
+            host = host,
+            port = port,
+            uuid = uuid,
+            password = password,
+            sni = sni,
+            allowInsecure = allowInsecure,
+            extra = params
+        )
+    }.getOrNull()
+
+    private fun parseWireGuard(raw: String, customName: String): ProxyProfile? = runCatching {
+        val normalized = if (raw.startsWith("wg://", true)) {
+            "wireguard://" + raw.substring(5)
+        } else raw
+        val uri = parseFlexibleUri(normalized) ?: return null
+        val privateKey = urlDecode(uri.userInfo)
+        val host = uri.host.trim()
+        val port = if (uri.port > 0) uri.port else 2408
+        val params = parseQueryMapCaseInsensitive(uri.rawQuery)
+        val priv = privateKey.ifBlank { params["privatekey"].orEmpty() }
+        if (host.isEmpty() || priv.isEmpty()) return null
+
+        val name = customName.ifBlank { uri.fragment.ifBlank { "WireGuard $host:$port" } }
+        ProxyProfile(
+            name = name,
+            kind = TransportKind.WIREGUARD,
+            rawUri = raw,
+            host = host,
+            port = port,
+            password = priv,
+            extra = params
         )
     }.getOrNull()
 
     private fun parseGreatFireV2Ray(raw: String, scheme: String, customName: String): ProxyProfile? = runCatching {
-        val uri = URI(raw)
-        val host = uri.host?.trim().orEmpty()
+        val uri = parseFlexibleUri(raw) ?: return null
+        val host = uri.host.trim()
         val port = if (uri.port > 0) uri.port else 443
-        val params = parseQueryMap(uri.rawQuery)
-        val id = params["id"] ?: uri.userInfo.orEmpty()
+        val params = parseQueryMapCaseInsensitive(uri.rawQuery)
+        val id = params["id"] ?: uri.userInfo
         if (host.isEmpty() || id.isEmpty()) return null
 
         val rawPath = params["path"].orEmpty()
@@ -264,8 +400,7 @@ object ProxyProfileParser {
             "v2wechat" -> TransportKind.V2RAY_WECHAT
             else -> TransportKind.V2RAY_WS
         }
-        val frag = uri.rawFragment?.let { urlDecode(it) }.orEmpty()
-        val label = customName.ifBlank { frag.ifBlank { "${scheme.uppercase()} $host:$port" } }
+        val label = customName.ifBlank { uri.fragment.ifBlank { "${scheme.uppercase()} $host:$port" } }
 
         ProxyProfile(
             name = label,
@@ -277,25 +412,39 @@ object ProxyProfileParser {
             path = path,
             sni = params["sni"] ?: host,
             frontHost = params["host"].orEmpty(),
-            allowInsecure = params["allowInsecure"] == "true" || params["allowInsecure"] == "1"
+            allowInsecure = params["allowinsecure"] == "true" || params["allowinsecure"] == "1",
+            extra = mapOf("engine" to "iep")
         )
     }.getOrNull()
 
     private fun parseShadowsocks(raw: String, customName: String): ProxyProfile? {
         val withoutScheme = raw.substring(5)
         val tag = withoutScheme.substringAfter('#', "").let { urlDecode(it) }
-        // Validate via ShadowsocksRunner parser structure
         val body = withoutScheme.substringBefore('#').substringBefore('?')
-        val hostPort = if (body.contains('@')) {
-            body.substringAfterLast('@')
+
+        val credsAndHost = if (body.contains('@')) {
+            val rawUser = body.substringBeforeLast('@')
+            val hostPart = body.substringAfterLast('@')
+            val decodedUser = if (rawUser.contains(':')) {
+                urlDecode(rawUser)
+            } else {
+                decodeBase64Utf8(rawUser) ?: urlDecode(rawUser)
+            }
+            decodedUser to hostPart
         } else {
             val dec = decodeBase64Utf8(body) ?: return null
             if (!dec.contains('@')) return null
-            dec.substringAfterLast('@')
+            dec.substringBeforeLast('@') to dec.substringAfterLast('@')
         }
-        val host = hostPort.substringBeforeLast(':')
+
+        val (methodPass, hostPort) = credsAndHost
+        if (!methodPass.contains(':')) return null
+        val method = methodPass.substringBefore(':').trim()
+        val password = methodPass.substringAfter(':')
+
+        val host = hostPort.substringBeforeLast(':').trim('[', ']')
         val port = hostPort.substringAfterLast(':').toIntOrNull() ?: return null
-        if (host.isBlank() || port !in 1..65535) return null
+        if (host.isBlank() || method.isBlank() || port !in 1..65535) return null
 
         val name = customName.ifBlank { tag.ifBlank { "Shadowsocks $host:$port" } }
         return ProxyProfile(
@@ -303,7 +452,9 @@ object ProxyProfileParser {
             kind = TransportKind.SHADOWSOCKS,
             rawUri = raw,
             host = host,
-            port = port
+            port = port,
+            username = method,
+            password = password
         )
     }
 
@@ -311,13 +462,14 @@ object ProxyProfileParser {
         val normalized = if (raw.startsWith("hy2://", true)) {
             "hysteria2://" + raw.substring(6)
         } else raw
-        val uri = URI(normalized)
-        val host = uri.host?.trim().orEmpty()
+        val uri = parseFlexibleUri(normalized) ?: return null
+        val host = uri.host.trim()
         val port = if (uri.port > 0) uri.port else 443
         if (host.isEmpty()) return null
-        val params = parseQueryMap(uri.rawQuery)
-        val frag = uri.rawFragment?.let { urlDecode(it) }.orEmpty()
-        val name = customName.ifBlank { frag.ifBlank { "Hysteria2 $host:$port" } }
+        val password = urlDecode(uri.userInfo)
+        val params = parseQueryMapCaseInsensitive(uri.rawQuery)
+        val allowInsecure = params["insecure"] == "1" || params["insecure"] == "true" || params["allowinsecure"] == "1"
+        val name = customName.ifBlank { uri.fragment.ifBlank { "Hysteria2 $host:$port" } }
 
         ProxyProfile(
             name = name,
@@ -325,7 +477,9 @@ object ProxyProfileParser {
             rawUri = normalized,
             host = host,
             port = port,
+            password = password,
             sni = params["sni"].orEmpty(),
+            allowInsecure = allowInsecure,
             extra = params
         )
     }.getOrNull()
@@ -379,11 +533,11 @@ object ProxyProfileParser {
     }.getOrNull()
 
     private fun parseMasque(raw: String, customName: String): ProxyProfile? = runCatching {
-        val uri = URI(raw)
-        val host = uri.host?.trim().orEmpty()
+        val uri = parseFlexibleUri(raw) ?: return null
+        val host = uri.host.trim()
         if (host.isEmpty()) return null
         val port = if (uri.port > 0) uri.port else 443
-        val token = uri.userInfo ?: parseQueryMap(uri.rawQuery)["token"].orEmpty()
+        val token = uri.userInfo.ifBlank { parseQueryMapCaseInsensitive(uri.rawQuery)["token"].orEmpty() }
         ProxyProfile(
             name = customName.ifBlank { "MASQUE $host:$port" },
             kind = TransportKind.MASQUE,
@@ -396,40 +550,44 @@ object ProxyProfileParser {
 
     private fun parseSnowflake(raw: String, customName: String): ProxyProfile? = runCatching {
         val query = raw.substringAfter('?', "").substringBefore('#')
-        val params = parseQueryMap(query)
+        val params = parseQueryMapCaseInsensitive(query)
         ProxyProfile(
-            name = customName.ifBlank { "Tor Snowflake Bridge" },
+            name = customName.ifBlank { "Tor + GreatFire Snowflake" },
             kind = TransportKind.SNOWFLAKE,
             rawUri = raw,
-            frontHost = params["front"].orEmpty(),
+            frontHost = params["front"] ?: params["fronts"].orEmpty(),
             extra = params
         )
     }.getOrNull()
 
     private fun parseLyrebirdPt(raw: String, scheme: String, customName: String): ProxyProfile? {
-        val params = parseQueryMap(raw.substringAfter('?', "").substringBefore('#')).toMutableMap()
+        val params = parseQueryMapCaseInsensitive(raw.substringAfter('?', "").substringBefore('#')).toMutableMap()
         params["pt"] = scheme
+        val kind = when (scheme) {
+            "meek" -> TransportKind.TOR_MEEK_BRIDGE
+            "obfs4" -> TransportKind.TOR_OBFS4_BRIDGE
+            else -> TransportKind.LYREBIRD_PT
+        }
         return ProxyProfile(
-            name = customName.ifBlank { "Pluggable Transport (${scheme.uppercase()})" },
-            kind = TransportKind.LYREBIRD_PT,
+            name = customName.ifBlank { "Tor Bridge (${scheme.uppercase()})" },
+            kind = kind,
             rawUri = raw,
             extra = params
         )
     }
 
     private fun parseStandardProxy(raw: String, kind: TransportKind, customName: String): ProxyProfile? = runCatching {
-        val uri = URI(raw)
-        val host = uri.host?.trim().orEmpty()
+        val uri = parseFlexibleUri(raw) ?: return null
+        val host = uri.host.trim()
         val port = uri.port
         if (host.isEmpty() || port !in 1..65535) return null
-        val userInfo = uri.userInfo.orEmpty()
+        val userInfo = uri.userInfo
         val user = if (userInfo.contains(':')) urlDecode(userInfo.substringBefore(':')) else urlDecode(userInfo)
         val pass = if (userInfo.contains(':')) urlDecode(userInfo.substringAfter(':')) else ""
-        val frag = uri.rawFragment?.let { urlDecode(it) }.orEmpty()
         val prefix = if (kind == TransportKind.SOCKS5) "SOCKS5" else "HTTP Proxy"
 
         ProxyProfile(
-            name = customName.ifBlank { frag.ifBlank { "$prefix $host:$port" } },
+            name = customName.ifBlank { uri.fragment.ifBlank { "$prefix $host:$port" } },
             kind = kind,
             rawUri = raw,
             host = host,
@@ -439,12 +597,77 @@ object ProxyProfileParser {
         )
     }.getOrNull()
 
+    private data class ParsedUriParts(
+        val userInfo: String,
+        val host: String,
+        val port: Int,
+        val rawQuery: String,
+        val fragment: String
+    )
+
+    /**
+     * Tolerant URI parser that handles unescaped emojis, spaces, or Persian characters in `#fragment`
+     * (common in public VLESS/Trojan subscriptions where strict `java.net.URI` throws URISyntaxException!).
+     */
+    private fun parseFlexibleUri(raw: String): ParsedUriParts? {
+        val afterScheme = raw.substringAfter("://", "")
+        if (afterScheme.isEmpty()) return null
+
+        val fragment = if (afterScheme.contains('#')) {
+            urlDecode(afterScheme.substringAfter('#'))
+        } else ""
+        val withoutFrag = afterScheme.substringBefore('#')
+
+        val rawQuery = if (withoutFrag.contains('?')) {
+            withoutFrag.substringAfter('?')
+        } else ""
+        val authorityAndPath = withoutFrag.substringBefore('?')
+        val authority = authorityAndPath.substringBefore('/')
+
+        val userInfo = if (authority.contains('@')) {
+            authority.substringBeforeLast('@')
+        } else ""
+        val hostPort = if (authority.contains('@')) {
+            authority.substringAfterLast('@')
+        } else authority
+
+        val host: String
+        val port: Int
+        if (hostPort.startsWith('[')) {
+            host = hostPort.substringAfter('[').substringBefore(']')
+            val rest = hostPort.substringAfter(']', "")
+            port = if (rest.startsWith(':')) rest.substring(1).toIntOrNull() ?: -1 else -1
+        } else if (hostPort.contains(':')) {
+            host = hostPort.substringBeforeLast(':')
+            port = hostPort.substringAfterLast(':').toIntOrNull() ?: -1
+        } else {
+            host = hostPort
+            port = -1
+        }
+
+        if (host.isBlank()) return null
+        return ParsedUriParts(userInfo, host, port, rawQuery, fragment)
+    }
+
     private fun parseQueryMap(rawQuery: String?): Map<String, String> {
         if (rawQuery.isNullOrBlank()) return emptyMap()
         val map = LinkedHashMap<String, String>()
         rawQuery.split('&').forEach { pair ->
             if (pair.isNotBlank()) {
                 val k = urlDecode(pair.substringBefore('='))
+                val v = urlDecode(pair.substringAfter('=', ""))
+                map[k] = v
+            }
+        }
+        return map
+    }
+
+    private fun parseQueryMapCaseInsensitive(rawQuery: String?): Map<String, String> {
+        if (rawQuery.isNullOrBlank()) return emptyMap()
+        val map = LinkedHashMap<String, String>()
+        rawQuery.split('&').forEach { pair ->
+            if (pair.isNotBlank()) {
+                val k = urlDecode(pair.substringBefore('=')).trim().lowercase()
                 val v = urlDecode(pair.substringAfter('=', ""))
                 map[k] = v
             }

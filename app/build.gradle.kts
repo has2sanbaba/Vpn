@@ -21,8 +21,8 @@ android {
         // Android 5.0 Lollipop (API 21) -> Android 15/16+ (API 35+)
         minSdk = 21
         targetSdk = 35
-        versionCode = 100
-        versionName = "1.0.0-greatfire"
+        versionCode = 200
+        versionName = "2.0.0-greatfire"
 
         multiDexEnabled = true
         vectorDrawables.useSupportLibrary = true
@@ -97,14 +97,17 @@ android {
 
     packaging {
         jniLibs {
-            // Required so libgfproxy.so (FreeBrowser/Anti-DPI) and libsslocal.so (Shadowsocks)
+            // Required so libgfproxy.so, libwarpplus.so, libsingbox.so, and libsslocal.so
             // are extracted to nativeLibraryDir with SELinux exec permission on Android 5..16
             useLegacyPackaging = true
             keepDebugSymbols += setOf(
                 "**/libcronet*.so",
                 "**/libgojni.so",
                 "**/libsslocal.so",
-                "**/libgfproxy.so"
+                "**/libgfproxy.so",
+                "**/libwarpplus.so",
+                "**/libsingbox.so",
+                "**/libtor.so"
             )
         }
         resources {
@@ -141,10 +144,9 @@ val ensureNativeGfProxy by tasks.registering(Exec::class) {
     workingDir = rootProject.projectDir
     commandLine("bash", "scripts/build-gfproxy-android.sh")
     onlyIf {
-        !file("src/main/jniLibs/arm64-v8a/libgfproxy.so").exists() ||
-            !file("src/main/jniLibs/armeabi-v7a/libgfproxy.so").exists() ||
-            !file("src/main/jniLibs/x86_64/libgfproxy.so").exists() ||
-            !file("src/main/jniLibs/x86/libgfproxy.so").exists()
+        val abis = listOf("arm64-v8a", "armeabi-v7a", "x86_64", "x86")
+        val bins = listOf("libgfproxy.so", "libwarpplus.so", "libsingbox.so")
+        abis.any { abi -> bins.any { bin -> !file("src/main/jniLibs/$abi/$bin").exists() } }
     }
 }
 
@@ -160,6 +162,11 @@ dependencies {
     // 2. IEnvoyProxy.aar e3.5.0 (V2Ray, XRay, Hysteria2, Snowflake, Lyrebird Obfs4/Meek/WebTunnel, MASQUE, ECH, DoH)
     implementation(files("libs/cronet-108.0.5359.195.aar"))
     implementation(files("libs/IEnvoyProxy.aar"))
+
+    // Official Guardian Project Tor JNI Client (chains in front of GreatFire IEnvoyProxy Pluggable Transports)
+    implementation("info.guardianproject:tor-android:0.4.8.12")
+    implementation("info.guardianproject:jtorctl:0.4.5.7")
+    implementation("androidx.localbroadcastmanager:localbroadcastmanager:1.1.0")
 
     implementation(platform("org.jetbrains.kotlin:kotlin-bom:2.1.20"))
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.9.0")
