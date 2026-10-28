@@ -35,8 +35,9 @@ class BrowserNavigationAndStatusTest {
 
     @Test
     fun gatewayStatusDefaultsAreCleanAndZeroWait() {
-        val status = GatewayStatus(ready = true, listenAddr = "127.0.0.1:18080", readyNodes = 12, bestRttMs = 142)
+        val status = GatewayStatus(ready = true, gatewayPort = 18080, readyNodes = 12, bestRttMs = 142L)
         assertTrue(status.ready)
+        assertEquals(18080, status.gatewayPort)
         assertEquals(12, status.readyNodes)
         assertEquals(142L, status.bestRttMs)
     }
