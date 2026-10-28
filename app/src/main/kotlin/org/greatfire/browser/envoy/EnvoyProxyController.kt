@@ -4,19 +4,20 @@ import IEnvoyProxy.Controller
 import IEnvoyProxy.IEnvoyProxy
 import android.content.Context
 import android.util.Log
+import org.greatfire.browser.vpn.LegacySslTrustBridge
 import org.greatfire.browser.vpn.ProxyProfile
 import org.greatfire.browser.vpn.TransportKind
 import java.io.File
 
 /**
  * Manages GreatFire's IEnvoyProxy (e3.5.0) multi-transport Go controller:
- * - V2Ray (WebSocket, HTTP, SRTP, WeChat + uTLS + Domain Fronting)
+ * - V2Ray (VMess WebSocket, HTTP, SRTP, WeChat + uTLS + Domain Fronting)
  * - XRay (XHTTP)
  * - Hysteria2 (QUIC)
- * - Tor Snowflake (WebRTC + Domain Fronting / AMP Cache)
- * - Lyrebird Pluggable Transports (Obfs4, MeekLite, WebTunnel)
  * - MASQUE (HTTP/2 CONNECT Relay)
  * - Envoy ECH (Encrypted Client Hello)
+ * - Tor Pluggable Transports (`Snowflake`, `MeekLite`, `Obfs4`, `Webtunnel`) — chained behind
+ *   Guardian Project's `TorService` via `TorBridgeRunner`!
  */
 class EnvoyProxyController(private val context: Context) {
 
@@ -36,14 +37,16 @@ class EnvoyProxyController(private val context: Context) {
     private fun ensureController(): Controller {
         controller?.let { return it }
 
+        LegacySslTrustBridge.ensureCaBundlePath(context)
+
         val stateDir = File(context.cacheDir, "iep-state")
         if (!stateDir.exists()) {
             stateDir.mkdirs()
         }
 
-        // Configure Go runtime DNS inside IEnvoyProxy to use encrypted DoH
+        // Use Google/Quad9 encrypted DoH bootstrap (higher reachability in Iran than 1.1.1.1)
         runCatching {
-            IEnvoyProxy.setDOHServer("1.1.1.1")
+            IEnvoyProxy.setDOHServer("8.8.8.8")
         }.onFailure {
             Log.w(TAG, "setDOHServer warning: ${it.message}")
         }
@@ -58,6 +61,37 @@ class EnvoyProxyController(private val context: Context) {
 
         controller = created
         return created
+    }
+
+    /**
+     * Starts a GreatFire `IEnvoyProxy` Pluggable Transport (`MeekLite`, `Snowflake`, `Obfs4`, `Webtunnel`)
+     * and returns its local PT-SOCKS5 address (`127.0.0.1:<port>`) to be consumed by `TorBridgeRunner`.
+     */
+    @Synchronized
+    fun startPluggableTransport(
+        ptMethod: String,
+        iceServers: String = DEFAULT_SNOWFLAKE_STUNS,
+        brokerUrl: String = DEFAULT_SNOWFLAKE_BROKER_CDN77,
+        frontDomains: String = DEFAULT_SNOWFLAKE_FRONTS_CDN77,
+        ampCacheUrl: String = ""
+    ): String {
+        stopActive()
+        val ctrl = ensureController()
+
+        if (ptMethod == IEnvoyProxy.Snowflake) {
+            ctrl.snowflakeIceServers = iceServers.ifBlank { DEFAULT_SNOWFLAKE_STUNS }
+            ctrl.snowflakeBrokerUrl = brokerUrl.ifBlank { DEFAULT_SNOWFLAKE_BROKER_CDN77 }
+            ctrl.snowflakeFrontDomains = frontDomains.ifBlank { DEFAULT_SNOWFLAKE_FRONTS_CDN77 }
+            ctrl.snowflakeAmpCacheUrl = ampCacheUrl
+            ctrl.snowflakeMaxPeers = 3L
+        }
+
+        ctrl.start(ptMethod, "")
+        activeMethod = ptMethod
+        val addr = ctrl.localAddress(ptMethod)
+        awaitEndpoint(addr, ptMethod)
+        Log.i(TAG, "GreatFire IEnvoyProxy Pluggable Transport $ptMethod listening on $addr")
+        return addr
     }
 
     @Synchronized
@@ -174,38 +208,7 @@ class EnvoyProxyController(private val context: Context) {
                 StartedEndpoint("envoy_http", echUrl, IEnvoyProxy.EnvoyEch)
             }
 
-            TransportKind.SNOWFLAKE -> {
-                ctrl.snowflakeIceServers = profile.extra["ice"]?.ifBlank { null }
-                    ?: "stun:stun.l.google.com:19302,stun:stun.voip.blackberry.com:3478,stun:stun.sonetel.com:3478"
-                ctrl.snowflakeBrokerUrl = profile.extra["broker"]?.ifBlank { null }
-                    ?: "https://snowflake-broker.torproject.net.global.prod.fastly.net/"
-                ctrl.snowflakeFrontDomains = profile.frontHost.ifBlank {
-                    "www.cdn77.com,www.phpmyadmin.net"
-                }
-                ctrl.snowflakeAmpCacheUrl = profile.extra["ampcache"].orEmpty()
-                ctrl.snowflakeMaxPeers = 2L
-
-                ctrl.start(IEnvoyProxy.Snowflake, "")
-                activeMethod = IEnvoyProxy.Snowflake
-                val addr = ctrl.localAddress(IEnvoyProxy.Snowflake)
-                awaitEndpoint(addr, IEnvoyProxy.Snowflake)
-                StartedEndpoint("socks5", addr, IEnvoyProxy.Snowflake)
-            }
-
-            TransportKind.LYREBIRD_PT -> {
-                val ptMethod = when (profile.extra["pt"]?.lowercase()) {
-                    "meek", "meek_lite" -> IEnvoyProxy.MeekLite
-                    "webtunnel" -> IEnvoyProxy.Webtunnel
-                    else -> IEnvoyProxy.Obfs4
-                }
-                ctrl.start(ptMethod, "")
-                activeMethod = ptMethod
-                val addr = ctrl.localAddress(ptMethod)
-                awaitEndpoint(addr, ptMethod)
-                StartedEndpoint("socks5", addr, ptMethod)
-            }
-
-            else -> throw IllegalArgumentException("Unsupported IEnvoyProxy transport: ${profile.kind}")
+            else -> throw IllegalArgumentException("Unsupported direct IEnvoyProxy transport: ${profile.kind}")
         }
     }
 
@@ -216,7 +219,7 @@ class EnvoyProxyController(private val context: Context) {
         val host = addr.substringBeforeLast(':')
         val port = addr.substringAfterLast(':').toIntOrNull()
             ?: throw IllegalStateException("Invalid port from IEnvoyProxy: $addr")
-        if (!ShadowsocksRunner.waitForTcpPort(host, port, 5500L)) {
+        if (!ShadowsocksRunner.waitForTcpPort(host, port, 6000L)) {
             Log.w(TAG, "Transport $method port $addr slow to respond; continuing")
         }
     }
@@ -234,5 +237,13 @@ class EnvoyProxyController(private val context: Context) {
 
     companion object {
         private const val TAG = "EnvoyProxyController"
+
+        // Live 2026 Orbot CDN77 / DataPacket Snowflake Broker, Fronts, and non-Google STUN servers
+        const val DEFAULT_SNOWFLAKE_BROKER_CDN77 = "https://1098762253.rsc.cdn77.org/"
+        const val DEFAULT_SNOWFLAKE_FRONTS_CDN77 = "app.datapacket.com,www.datapacket.com,www.phpmyadmin.net"
+        const val DEFAULT_SNOWFLAKE_STUNS =
+            "stun:stun.epygi.com:3478,stun:stun.uls.co.za:3478,stun:stun.voipgate.com:3478," +
+                "stun:stun.mixvoip.com:3478,stun:stun.telnyx.com:3478,stun:stun.hot-chilli.net:3478," +
+                "stun:stun.m-online.net:3478"
     }
 }

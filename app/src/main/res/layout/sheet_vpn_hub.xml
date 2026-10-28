@@ -72,6 +72,20 @@
             app:cornerRadius="10dp" />
     </LinearLayout>
 
+    <com.google.android.material.button.MaterialButton
+        android:id="@+id/btnHubFetchFree"
+        style="@style/Widget.MaterialComponents.Button.OutlinedButton"
+        android:layout_width="match_parent"
+        android:layout_height="38dp"
+        android:layout_marginTop="8dp"
+        android:insetTop="0dp"
+        android:insetBottom="0dp"
+        android:text="🌐 دریافت خودکار سرورهای رایگان جدید (VLESS-Reality / Trojan)"
+        android:textColor="@color/gf_accent"
+        android:textSize="11.5sp"
+        app:cornerRadius="10dp"
+        app:strokeColor="@color/gf_accent" />
+
     <!-- Security Toggles -->
     <com.google.android.material.switchmaterial.SwitchMaterial
         android:id="@+id/swKillSwitch"

@@ -2,6 +2,7 @@ package org.greatfire.browser.vpn
 
 import android.content.Context
 import org.json.JSONArray
+import org.json.JSONObject
 
 class ProfileRepository(context: Context) {
 
@@ -10,20 +11,50 @@ class ProfileRepository(context: Context) {
     fun builtInProfiles(): List<ProxyProfile> = listOf(
         ProxyProfile(
             id = ID_SMART_AUTO,
-            name = "⚡ اتصال هوشمند خودکار (GreatFire Smart Auto)",
+            name = "⚡ اتصال هوشمند خودکار (تضمینی • چندموتوره)",
             kind = TransportKind.SMART_AUTO,
             builtIn = true,
             genevaStrategy = 1,
-            fragSize = 24,
+            fragSize = 16,
             fragDelayMs = 4
         ),
         ProxyProfile(
-            id = ID_FREEBROWSER_STRICT,
-            name = "🛡 موتور FreeBrowser (ضد DPI شدید + DoH)",
-            kind = TransportKind.FREEBROWSER_ANTI_DPI,
+            id = ID_WARP_CLEAN,
+            name = "🚀 کلودفلر WARP+ (اسکن خودکار آی‌پی تمیز)",
+            kind = TransportKind.WARP_CLEAN_SCAN,
+            builtIn = true
+        ),
+        ProxyProfile(
+            id = ID_WARP_GOOL,
+            name = "🔥 وارپ در وارپ (Gool • عبور از فیلترینگ شدید)",
+            kind = TransportKind.WARP_IN_WARP_GOOL,
+            builtIn = true
+        ),
+        ProxyProfile(
+            id = ID_WARP_PSIPHON,
+            name = "🌍 سایفون + WARP (آی‌پی آلمان • بدون سرور)",
+            kind = TransportKind.WARP_PSIPHON_CFON,
             builtIn = true,
-            fragSize = 12,
-            fragDelayMs = 6
+            extra = mapOf("country" to "DE")
+        ),
+        ProxyProfile(
+            id = ID_TOR_MEEK,
+            name = "🌉 پل Tor + GreatFire Meek (CDN77 HTTPS • ضد قطع UDP)",
+            kind = TransportKind.TOR_MEEK_BRIDGE,
+            builtIn = true
+        ),
+        ProxyProfile(
+            id = ID_TOR_SNOWFLAKE,
+            name = "❄ پل Tor + GreatFire Snowflake (CDN77 WebRTC)",
+            kind = TransportKind.SNOWFLAKE,
+            builtIn = true,
+            frontHost = "app.datapacket.com,www.datapacket.com"
+        ),
+        ProxyProfile(
+            id = ID_TOR_OBFS4,
+            name = "🛡 پل Tor + GreatFire Obfs4 (Lyrebird)",
+            kind = TransportKind.TOR_OBFS4_BRIDGE,
+            builtIn = true
         ),
         ProxyProfile(
             id = ID_CRONET_GENEVA,
@@ -31,15 +62,16 @@ class ProfileRepository(context: Context) {
             kind = TransportKind.CRONET_GENEVA,
             builtIn = true,
             genevaStrategy = 2,
-            fragSize = 20,
+            fragSize = 16,
             fragDelayMs = 4
         ),
         ProxyProfile(
-            id = ID_TOR_SNOWFLAKE,
-            name = "❄ پل Tor Snowflake (WebRTC بدون سرور)",
-            kind = TransportKind.SNOWFLAKE,
+            id = ID_FREEBROWSER_STRICT,
+            name = "🔧 موتور FreeBrowser (ضد SNI/DNS مستقیم)",
+            kind = TransportKind.FREEBROWSER_ANTI_DPI,
             builtIn = true,
-            frontHost = "www.cdn77.com,www.phpmyadmin.net"
+            fragSize = 12,
+            fragDelayMs = 5
         )
     )
 
@@ -66,17 +98,18 @@ class ProfileRepository(context: Context) {
         }.getOrDefault(emptyList())
     }
 
-    fun addCustomProfiles(newItems: List<ProxyProfile>): Int {
+    fun addCustomProfiles(newItems: List<ProxyProfile>, maxTotalCustom: Int = 120): Int {
         if (newItems.isEmpty()) return 0
         val current = loadCustomProfiles().toMutableList()
         val existingUris = current.map { it.rawUri }.filter { it.isNotBlank() }.toMutableSet()
         var added = 0
         for (item in newItems) {
             if (item.rawUri.isNotBlank() && !existingUris.add(item.rawUri)) continue
-            current.add(item.copy(builtIn = false))
+            current.add(0, item.copy(builtIn = false))
             added++
         }
-        saveCustomProfiles(current)
+        val trimmed = if (current.size > maxTotalCustom) current.take(maxTotalCustom) else current
+        saveCustomProfiles(trimmed)
         return added
     }
 
@@ -91,7 +124,7 @@ class ProfileRepository(context: Context) {
     fun updateLatency(profileId: String, latencyMs: Long) {
         val map = loadLatencyMap().toMutableMap()
         map[profileId] = latencyMs
-        val json = org.json.JSONObject()
+        val json = JSONObject()
         map.forEach { (k, v) -> json.put(k, v) }
         prefs.edit().putString(KEY_LATENCIES, json.toString()).apply()
     }
@@ -99,7 +132,7 @@ class ProfileRepository(context: Context) {
     private fun loadLatencyMap(): Map<String, Long> {
         val raw = prefs.getString(KEY_LATENCIES, null) ?: return emptyMap()
         return runCatching {
-            val obj = org.json.JSONObject(raw)
+            val obj = JSONObject(raw)
             val out = mutableMapOf<String, Long>()
             val keys = obj.keys()
             while (keys.hasNext()) {
@@ -142,8 +175,13 @@ class ProfileRepository(context: Context) {
         private const val KEY_LATENCIES = "profile_latencies"
 
         const val ID_SMART_AUTO = "builtin-smart-auto"
+        const val ID_WARP_CLEAN = "builtin-warp-clean"
+        const val ID_WARP_GOOL = "builtin-warp-gool"
+        const val ID_WARP_PSIPHON = "builtin-warp-psiphon"
+        const val ID_TOR_MEEK = "builtin-tor-meek"
+        const val ID_TOR_SNOWFLAKE = "builtin-tor-snowflake"
+        const val ID_TOR_OBFS4 = "builtin-tor-obfs4"
         const val ID_FREEBROWSER_STRICT = "builtin-freebrowser-strict"
         const val ID_CRONET_GENEVA = "builtin-cronet-geneva"
-        const val ID_TOR_SNOWFLAKE = "builtin-tor-snowflake"
     }
 }

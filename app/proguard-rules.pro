@@ -11,6 +11,11 @@
 -dontwarn go.**
 -dontwarn IEnvoyProxy.**
 
+# Guardian Project Tor JNI Service & Control
+-keep class org.torproject.** { *; }
+-keep class net.freehaven.tor.control.** { *; }
+-dontwarn org.torproject.**
+
 # GreatFire Browser classes
 -keep class org.greatfire.** { *; }
 

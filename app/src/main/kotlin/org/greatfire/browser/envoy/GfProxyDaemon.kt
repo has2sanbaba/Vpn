@@ -6,6 +6,7 @@ import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
+import org.greatfire.browser.vpn.LegacySslTrustBridge
 import org.json.JSONObject
 import java.io.File
 import java.net.URLEncoder
@@ -15,8 +16,8 @@ import java.util.concurrent.TimeUnit
 /**
  * Supervises our native Go GreatFire FreeBrowser/Anti-DPI + Unified Gateway binary (`libgfproxy.so`).
  * All WebView traffic points permanently to `127.0.0.1:gatewayPort`, allowing 0ms leak-free
- * switching between Anti-DPI, IEnvoyProxy (V2Ray/XRay/Hysteria2/Snowflake/MASQUE/ECH),
- * Envoy/Cronet, Shadowsocks, custom proxies, and Kill-Switch mode.
+ * switching between WARP+, Sing-Box (VLESS/Trojan/TUIC), Tor+IEnvoyProxy Bridges, Shadowsocks,
+ * Envoy/Cronet, Anti-DPI, and Strict Kill-Switch mode.
  */
 class GfProxyDaemon(private val context: Context) {
 
@@ -52,12 +53,12 @@ class GfProxyDaemon(private val context: Context) {
 
     private val controlClient: OkHttpClient = OkHttpClient.Builder()
         .connectTimeout(4, TimeUnit.SECONDS)
-        .readTimeout(14, TimeUnit.SECONDS)
+        .readTimeout(18, TimeUnit.SECONDS)
         .writeTimeout(5, TimeUnit.SECONDS)
         .build()
 
     @Synchronized
-    fun ensureStarted(): Int {
+    fun ensureStarted(initialMode: String = "blocked"): Int {
         val current = process
         if (current != null && isAliveCompat(current) && gatewayPort > 0) {
             return gatewayPort
@@ -79,14 +80,14 @@ class GfProxyDaemon(private val context: Context) {
             "-listen", "127.0.0.1:$gwPort",
             "-control", "127.0.0.1:$ctrlPort",
             "-token", authToken,
-            "-mode", "anti_dpi",
+            "-mode", initialMode,
             "-fbconfig", fbConfigFile.absolutePath
         )
 
-        val started = ProcessBuilder(cmd)
-            .redirectErrorStream(true)
-            .start()
+        val pb = ProcessBuilder(cmd).redirectErrorStream(true)
+        LegacySslTrustBridge.applyGoTlsEnv(context, pb.environment())
 
+        val started = pb.start()
         process = started
         gatewayPort = gwPort
         controlPort = ctrlPort
@@ -105,7 +106,7 @@ class GfProxyDaemon(private val context: Context) {
         }
         ShadowsocksRunner.waitForTcpPort("127.0.0.1", ctrlPort, 2500L)
 
-        Log.i(TAG, "GreatFire unified gateway active on 127.0.0.1:$gwPort (control :$ctrlPort)")
+        Log.i(TAG, "GreatFire unified gateway active on 127.0.0.1:$gwPort (control :$ctrlPort, initial=$initialMode)")
         return gwPort
     }
 
@@ -178,11 +179,19 @@ class GfProxyDaemon(private val context: Context) {
         }.getOrNull()
     }
 
-    fun probe(url: String = "https://www.google.com/generate_204"): ProbeResult {
+    /**
+     * Probes a genuinely censored target (`https://www.youtube.com/generate_204` by default,
+     * NEVER uncensored google.com!) through the active upstream tunnel to guarantee real
+     * censorship bypass before reporting `CONNECTED`.
+     */
+    fun probe(
+        url: String = DEFAULT_CENSORED_PROBE_URL,
+        timeoutMs: Int = 10000
+    ): ProbeResult {
         ensureStarted()
         val encoded = URLEncoder.encode(url, "UTF-8")
         val req = Request.Builder()
-            .url("http://127.0.0.1:$controlPort/probe?url=$encoded")
+            .url("http://127.0.0.1:$controlPort/probe?url=$encoded&timeout_ms=$timeoutMs")
             .header("X-GF-Token", authToken)
             .get()
             .build()
@@ -200,6 +209,19 @@ class GfProxyDaemon(private val context: Context) {
         }.getOrElse { err ->
             ProbeResult(ok = false, statusCode = 0, latencyMs = -1L, error = err.message)
         }
+    }
+
+    /**
+     * Multi-target real censorship-bypass check: tries YouTube's lightweight 204 endpoint first,
+     * with fallback to X/Twitter robots.txt so temporary single-CDN hiccups don't false-negative,
+     * while guaranteeing local-only connections can NEVER pass when YouTube & X are IP/SNI-filtered.
+     */
+    fun verifyRealCensorshipBypass(timeoutMs: Int = 10000): ProbeResult {
+        val primary = probe(DEFAULT_CENSORED_PROBE_URL, timeoutMs)
+        if (primary.ok) return primary
+        val secondary = probe(FALLBACK_CENSORED_PROBE_URL, timeoutMs)
+        if (secondary.ok) return secondary
+        return primary
     }
 
     @Synchronized
@@ -221,6 +243,8 @@ class GfProxyDaemon(private val context: Context) {
 
     companion object {
         private const val TAG = "GfProxyDaemon"
+        const val DEFAULT_CENSORED_PROBE_URL = "https://www.youtube.com/generate_204"
+        const val FALLBACK_CENSORED_PROBE_URL = "https://x.com/robots.txt"
         private val JSON_MEDIA = "application/json; charset=utf-8".toMediaType()
 
         private fun buildRandomHex(numBytes: Int): String {

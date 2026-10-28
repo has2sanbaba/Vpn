@@ -293,6 +293,7 @@ func (r *UpstreamRouter) roundTripEnvoyRewrite(ctx context.Context, cfg RuntimeC
 			}
 			tlsConn := tls.Client(rawConn, &tls.Config{
 				ServerName: host,
+				RootCAs:    AndroidRootCertPool(),
 				NextProtos: []string{"h2", "http/1.1"},
 				MinVersion: tls.VersionTLS12,
 			})
@@ -326,6 +327,7 @@ func (r *UpstreamRouter) roundTripDomainFronting(ctx context.Context, node CDNFr
 			// Domain fronting connects to CDN edge with empty/benign SNI per GreatFire FreeBrowser design
 			tlsConn := tls.Client(raw, &tls.Config{
 				ServerName: "",
+				RootCAs:    AndroidRootCertPool(),
 				MinVersion: tls.VersionTLS12,
 			})
 			if err := tlsConn.HandshakeContext(dialCtx); err != nil {
@@ -343,12 +345,12 @@ func (r *UpstreamRouter) roundTripDomainFronting(ctx context.Context, node CDNFr
 // passing the domain name directly so DNS resolution happens remotely on the tunnel endpoint (zero DNS leak!).
 func dialViaSOCKS5(ctx context.Context, proxyAddr, username, password, targetHost, targetPort string) (net.Conn, error) {
 	var d net.Dialer
-	d.Timeout = 12 * time.Second
+	d.Timeout = 15 * time.Second
 	conn, err := d.DialContext(ctx, "tcp", proxyAddr)
 	if err != nil {
 		return nil, err
 	}
-	_ = conn.SetDeadline(time.Now().Add(15 * time.Second))
+	_ = conn.SetDeadline(time.Now().Add(30 * time.Second))
 
 	if username != "" {
 		_, err = conn.Write([]byte{0x05, 0x02, 0x00, 0x02})

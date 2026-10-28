@@ -49,6 +49,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var binding: ActivityMainBinding
     private lateinit var tunnelManager: TunnelManager
     internal lateinit var tabManager: BrowserTabManager
+    private var previousVpnState: VpnConnectionState = VpnConnectionState.CONNECTING
 
     data class QuickSite(val title: String, val subtitle: String, val url: String)
 
@@ -102,7 +103,7 @@ class MainActivity : AppCompatActivity() {
 
         val abi = Build.SUPPORTED_ABIS.firstOrNull() ?: "universal"
         binding.tvDeviceCompatInfo.text =
-            "GreatFire Envoy + Cronet + IEnvoyProxy + FreeBrowser\nAndroid ${Build.VERSION.RELEASE} (API ${Build.VERSION.SDK_INT}) • CPU: $abi"
+            "GreatFire Envoy + WARP+ + Tor Bridges + Sing-Box v2.0\nAndroid ${Build.VERSION.RELEASE} (API ${Build.VERSION.SDK_INT}) • CPU: $abi"
 
         lifecycleScope.launch {
             repeatOnLifecycle(Lifecycle.State.STARTED) {
@@ -399,6 +400,10 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun renderTunnelState(state: TunnelUiState) {
+        val justConnected = previousVpnState != VpnConnectionState.CONNECTED &&
+            state.state == VpnConnectionState.CONNECTED
+        previousVpnState = state.state
+
         when (state.state) {
             VpnConnectionState.CONNECTED -> {
                 binding.btnVpnShield.setBackgroundResource(R.drawable.bg_shield_pill_connected)
@@ -409,9 +414,17 @@ class MainActivity : AppCompatActivity() {
                     getString(R.string.vpn_connected)
                 }
 
-                binding.tvHeroTitle.text = "تونل ضد فیلتر GreatFire فعال است"
-                binding.tvHeroProfile.text = state.activeProfile?.name ?: state.statusDetail
+                binding.tvHeroTitle.text = "تونل ضد فیلتر فعال است (تأیید شده با یوتیوب)"
+                binding.tvHeroProfile.text = state.statusDetail
                 binding.btnHeroToggleVpn.text = getString(R.string.btn_disconnect)
+
+                // If user opened a filtered site while tunnel was still connecting, auto-load it now!
+                if (justConnected) {
+                    val active = tabManager.activeTab
+                    if (active != null && active.currentUrl != BrowserTabManager.HOME_URL) {
+                        active.webView.loadUrl(active.currentUrl)
+                    }
+                }
             }
 
             VpnConnectionState.CONNECTING -> {

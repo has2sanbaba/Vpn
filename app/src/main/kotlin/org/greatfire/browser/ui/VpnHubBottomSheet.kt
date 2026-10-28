@@ -80,6 +80,29 @@ class VpnHubBottomSheet : BottomSheetDialogFragment() {
             showAddCustomDialog()
         }
 
+        binding.btnHubFetchFree.setOnClickListener {
+            binding.btnHubFetchFree.isEnabled = false
+            Toast.makeText(requireContext(), "درحال دریافت سرورهای رایگان جدید از مسیر ضد DPI…", Toast.LENGTH_SHORT).show()
+            viewLifecycleOwner.lifecycleScope.launch {
+                val res = tunnelManager.fetchPublicFreeServers()
+                binding.btnHubFetchFree.isEnabled = true
+                res.onSuccess { added ->
+                    refreshProfiles()
+                    Toast.makeText(
+                        requireContext(),
+                        "✅ تعداد $added سرور جدید (VLESS-Reality / Trojan / Hy2) اضافه شد",
+                        Toast.LENGTH_LONG
+                    ).show()
+                }.onFailure { err ->
+                    Toast.makeText(
+                        requireContext(),
+                        "⚠ ${err.message ?: "خطا در دریافت سرورها"}",
+                        Toast.LENGTH_LONG
+                    ).show()
+                }
+            }
+        }
+
         binding.btnHubPingAll.setOnClickListener {
             binding.btnHubPingAll.isEnabled = false
             viewLifecycleOwner.lifecycleScope.launch {
@@ -147,14 +170,14 @@ class VpnHubBottomSheet : BottomSheetDialogFragment() {
         if (parsed.isEmpty()) {
             Toast.makeText(
                 requireContext(),
-                "فرمت لینک شناسایی نشد (پشتیبانی: vmess, vless, v2ws, ss, hy2, envoy, masque, snowflake, socks5)",
+                "فرمت لینک شناسایی نشد (پشتیبانی: vless, trojan, tuic, vmess, hy2, ss, wg, envoy, masque, snowflake, socks5)",
                 Toast.LENGTH_LONG
             ).show()
             return
         }
 
         val added = tunnelManager.repository.addCustomProfiles(parsed)
-        val first = tunnelManager.repository.loadCustomProfiles().lastOrNull()
+        val first = tunnelManager.repository.loadCustomProfiles().firstOrNull()
         if (first != null) {
             tunnelManager.connect(first.id)
         }

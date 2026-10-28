@@ -4,9 +4,11 @@ import android.content.Context
 import android.net.http.SslCertificate
 import android.net.http.SslError
 import android.os.Build
+import android.util.Base64
 import android.util.Log
 import org.greatfire.browser.R
 import java.io.ByteArrayInputStream
+import java.io.File
 import java.security.KeyStore
 import java.security.cert.CertificateFactory
 import java.security.cert.X509Certificate
@@ -17,9 +19,11 @@ import javax.net.ssl.TrustManagerFactory
 import javax.net.ssl.X509TrustManager
 
 /**
- * Provides genuine cryptographic verification of Let's Encrypt (ISRG Root X1 & X2) certificates
- * on older Android phones (Android 5.0 Lollipop - Android 7.0 Nougat, API 21..24) whose factory
- * ROM trust store predates ISRG Root X1, without ever weakening certificate validation!
+ * 1. Provides genuine cryptographic verification of Let's Encrypt (ISRG Root X1 & X2) certificates
+ *    on older Android phones (Android 5.0 Lollipop - Android 7.0 Nougat, API 21..24).
+ * 2. Exports a unified PEM CA bundle (`cacert.pem`) combining AndroidCAStore + ISRG Root X1/X2
+ *    so standalone Go daemons (`libgfproxy.so`, `libwarpplus.so`, `libsingbox.so`) have full X.509
+ *    root trust across Android 5.0 through Android 16+ (including `/apex/com.android.conscrypt`).
  */
 object LegacySslTrustBridge {
     private const val TAG = "LegacySslTrustBridge"
@@ -32,6 +36,10 @@ object LegacySslTrustBridge {
     var sslSocketFactory: SSLSocketFactory? = null
         private set
 
+    @Volatile
+    var caBundlePemPath: String? = null
+        private set
+
     fun initialize(context: Context) {
         try {
             val cf = CertificateFactory.getInstance("X.509")
@@ -41,6 +49,10 @@ object LegacySslTrustBridge {
             val isrgX2 = context.resources.openRawResource(R.raw.isrg_root_x2).use {
                 cf.generateCertificate(it) as X509Certificate
             }
+
+            val pemBuilder = StringBuilder(196 * 1024)
+            appendPemCert(pemBuilder, isrgX1.encoded)
+            appendPemCert(pemBuilder, isrgX2.encoded)
 
             val keyStore = KeyStore.getInstance(KeyStore.getDefaultType()).apply {
                 load(null, null)
@@ -55,8 +67,19 @@ object LegacySslTrustBridge {
                     val alias = aliases.nextElement()
                     systemKs.getCertificate(alias)?.let { cert ->
                         setCertificateEntry("sys_$alias", cert)
+                        runCatching { appendPemCert(pemBuilder, cert.encoded) }
                     }
                 }
+            }
+
+            val pemFile = File(context.filesDir, "cacert.pem")
+            if (!pemFile.exists() || pemFile.length() < 8192L) {
+                runCatching {
+                    pemFile.writeText(pemBuilder.toString(), Charsets.US_ASCII)
+                }
+            }
+            if (pemFile.exists() && pemFile.length() > 0L) {
+                caBundlePemPath = pemFile.absolutePath
             }
 
             val tmf = TrustManagerFactory.getInstance(TrustManagerFactory.getDefaultAlgorithm())
@@ -69,8 +92,35 @@ object LegacySslTrustBridge {
                 sslSocketFactory = sslCtx.socketFactory
             }
         } catch (t: Throwable) {
-            Log.w(TAG, "Custom trust store init skipped: ${t.message}")
+            Log.w(TAG, "Custom trust store init warning: ${t.message}")
         }
+    }
+
+    fun ensureCaBundlePath(context: Context): String? {
+        caBundlePemPath?.let { path ->
+            if (File(path).exists()) return path
+        }
+        initialize(context.applicationContext)
+        return caBundlePemPath
+    }
+
+    fun applyGoTlsEnv(context: Context, env: MutableMap<String, String>) {
+        ensureCaBundlePath(context)?.let { pemPath ->
+            env["SSL_CERT_FILE"] = pemPath
+        }
+        env["SSL_CERT_DIR"] = "/apex/com.android.conscrypt/cacerts:/system/etc/security/cacerts"
+    }
+
+    private fun appendPemCert(sb: StringBuilder, derBytes: ByteArray) {
+        val b64 = Base64.encodeToString(derBytes, Base64.NO_WRAP)
+        sb.append("-----BEGIN CERTIFICATE-----\n")
+        var i = 0
+        while (i < b64.length) {
+            val end = minOf(i + 64, b64.length)
+            sb.append(b64, i, end).append('\n')
+            i = end
+        }
+        sb.append("-----END CERTIFICATE-----\n")
     }
 
     /**
@@ -91,7 +141,6 @@ object LegacySslTrustBridge {
             val x509 = cf.generateCertificate(ByteArrayInputStream(derBytes)) as X509Certificate
             x509.checkValidity()
             tm.checkServerTrusted(arrayOf(x509), "ECDHE_RSA")
-            // Also verify subjectAltName / CN matches expectedHost!
             HttpsURLConnection.getDefaultHostnameVerifier().verify(host, FakeCertSession(x509))
         } catch (_: Throwable) {
             false

@@ -5,12 +5,15 @@ import (
 	"context"
 	"crypto/rand"
 	"crypto/tls"
+	"crypto/x509"
 	"encoding/binary"
 	"errors"
 	"fmt"
 	"io"
 	"net"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -27,12 +30,66 @@ type DoHEndpoint struct {
 	Path       string
 }
 
+// Prioritized for maximum reachability on Iranian ISPs (MCI, Irancell, TCI, Shatel, Rightel)
+// when combined with TLS ClientHello SNI Record Fragmentation.
 var defaultDoHEndpoints = []DoHEndpoint{
+	{Name: "Google-1", IP: "8.8.8.8", Port: "443", ServerName: "dns.google", Path: "/dns-query"},
+	{Name: "Quad9-11", IP: "9.9.9.11", Port: "443", ServerName: "dns11.quad9.net", Path: "/dns-query"},
+	{Name: "AdGuard-1", IP: "94.140.14.14", Port: "443", ServerName: "dns.adguard-dns.com", Path: "/dns-query"},
+	{Name: "Google-2", IP: "8.8.4.4", Port: "443", ServerName: "dns.google", Path: "/dns-query"},
+	{Name: "Quad9-Alt", IP: "149.112.112.11", Port: "443", ServerName: "dns11.quad9.net", Path: "/dns-query"},
 	{Name: "Cloudflare-1", IP: "1.1.1.1", Port: "443", ServerName: "cloudflare-dns.com", Path: "/dns-query"},
 	{Name: "Cloudflare-2", IP: "1.0.0.1", Port: "443", ServerName: "cloudflare-dns.com", Path: "/dns-query"},
-	{Name: "Google-1", IP: "8.8.8.8", Port: "443", ServerName: "dns.google", Path: "/dns-query"},
-	{Name: "Quad9", IP: "9.9.9.9", Port: "443", ServerName: "dns.quad9.net", Path: "/dns-query"},
-	{Name: "AdGuard", IP: "94.140.14.14", Port: "443", ServerName: "dns.adguard-dns.com", Path: "/dns-query"},
+}
+
+var (
+	androidRootPoolOnce sync.Once
+	androidRootPool     *x509.CertPool
+)
+
+// AndroidRootCertPool builds a complete x509.CertPool that works across ALL Android versions:
+// - Android 5.0–7.0 (via exported SSL_CERT_FILE containing AndroidCAStore + ISRG Root X1/X2)
+// - Android 7.1–13 (/system/etc/security/cacerts)
+// - Android 14–16+ (/apex/com.android.conscrypt/cacerts)
+func AndroidRootCertPool() *x509.CertPool {
+	androidRootPoolOnce.Do(func() {
+		pool, err := x509.SystemCertPool()
+		if err != nil || pool == nil {
+			pool = x509.NewCertPool()
+		}
+
+		if envFile := strings.TrimSpace(os.Getenv("SSL_CERT_FILE")); envFile != "" {
+			if pemBytes, readErr := os.ReadFile(envFile); readErr == nil {
+				pool.AppendCertsFromPEM(pemBytes)
+			}
+		}
+
+		for _, dir := range []string{
+			"/apex/com.android.conscrypt/cacerts",
+			"/system/etc/security/cacerts",
+			"/system/etc/security/cacerts_google",
+		} {
+			entries, readErr := os.ReadDir(dir)
+			if readErr != nil {
+				continue
+			}
+			for _, entry := range entries {
+				if entry.IsDir() {
+					continue
+				}
+				full := filepath.Join(dir, entry.Name())
+				if data, err := os.ReadFile(full); err == nil {
+					if !pool.AppendCertsFromPEM(data) {
+						if cert, derErr := x509.ParseCertificate(data); derErr == nil {
+							pool.AddCert(cert)
+						}
+					}
+				}
+			}
+		}
+		androidRootPool = pool
+	})
+	return androidRootPool
 }
 
 type dnsCacheItem struct {
@@ -42,7 +99,7 @@ type dnsCacheItem struct {
 
 // DoHResolver resolves hostnames over encrypted DNS-over-HTTPS (RFC 8484 wireformat),
 // using TLS ClientHello record fragmentation on the DoH handshake itself and filtering
-// out ISP-poisoned censorship IPs (inspired by GreatFire FreeBrowser fbproxy).
+// out ISP-poisoned censorship IPs.
 type DoHResolver struct {
 	mu          sync.RWMutex
 	cache       map[string]dnsCacheItem
@@ -59,8 +116,8 @@ func NewDoHResolver() *DoHResolver {
 	return &DoHResolver{
 		cache:       make(map[string]dnsCacheItem),
 		fragEnabled: true,
-		fragSize:    24,
-		fragDelay:   4 * time.Millisecond,
+		fragSize:    16,
+		fragDelay:   5 * time.Millisecond,
 	}
 }
 
@@ -120,11 +177,11 @@ func (r *DoHResolver) Resolve(ctx context.Context, host string) ([]string, error
 		err error
 	}
 
-	queryCtx, cancel := context.WithTimeout(ctx, 7*time.Second)
+	queryCtx, cancel := context.WithTimeout(ctx, 8*time.Second)
 	defer cancel()
 
-	// Race top 3 DoH servers concurrently for lowest latency (FreeBrowser method)
-	limit := 3
+	// Race top 4 DoH servers concurrently for lowest latency and highest resilience
+	limit := 4
 	if len(endpoints) < limit {
 		limit = len(endpoints)
 	}
@@ -132,9 +189,8 @@ func (r *DoHResolver) Resolve(ctx context.Context, host string) ([]string, error
 	for i := 0; i < limit; i++ {
 		ep := endpoints[i]
 		go func(endpoint DoHEndpoint) {
-			ips, ttl, err := queryDoHWireformat(queryCtx, endpoint, key, 1, fragEnabled, fragSize, fragDelay) // QTYPE A = 1
+			ips, ttl, err := queryDoHWireformat(queryCtx, endpoint, key, 1, fragEnabled, fragSize, fragDelay)
 			if err != nil || len(ips) == 0 {
-				// Try AAAA (28) if A gave nothing
 				ips6, ttl6, err6 := queryDoHWireformat(queryCtx, endpoint, key, 28, fragEnabled, fragSize, fragDelay)
 				if err6 == nil && len(ips6) > 0 {
 					resCh <- dohResult{ips: ips6, ttl: ttl6}
@@ -225,8 +281,11 @@ func parseCustomDoH(raw string) (DoHEndpoint, bool) {
 	if strings.EqualFold(host, "dns.google") {
 		return DoHEndpoint{Name: "Custom-Google", IP: "8.8.8.8", Port: port, ServerName: host, Path: path}, true
 	}
-	if strings.EqualFold(host, "dns.quad9.net") {
-		return DoHEndpoint{Name: "Custom-Quad9", IP: "9.9.9.9", Port: port, ServerName: host, Path: path}, true
+	if strings.EqualFold(host, "dns.quad9.net") || strings.EqualFold(host, "dns11.quad9.net") {
+		return DoHEndpoint{Name: "Custom-Quad9", IP: "9.9.9.11", Port: port, ServerName: host, Path: path}, true
+	}
+	if strings.EqualFold(host, "dns.adguard-dns.com") {
+		return DoHEndpoint{Name: "Custom-AdGuard", IP: "94.140.14.14", Port: port, ServerName: host, Path: path}, true
 	}
 	return DoHEndpoint{}, false
 }
@@ -247,7 +306,7 @@ func queryDoHWireformat(
 
 	transport := &http.Transport{
 		ForceAttemptHTTP2: true,
-		DialTLSContext: func(dialCtx context.Context, network, _ string) (net.Conn, error) {
+		DialTLSContext: func(dialCtx context.Context, _, _ string) (net.Conn, error) {
 			var d net.Dialer
 			d.Timeout = 5 * time.Second
 			rawConn, err := d.DialContext(dialCtx, "tcp", net.JoinHostPort(ep.IP, ep.Port))
@@ -260,6 +319,7 @@ func queryDoHWireformat(
 			}
 			tlsCfg := &tls.Config{
 				ServerName: ep.ServerName,
+				RootCAs:    AndroidRootCertPool(),
 				NextProtos: []string{"h2", "http/1.1"},
 				MinVersion: tls.VersionTLS12,
 			}
@@ -314,7 +374,6 @@ func buildDNSQuery(domain string, qtype uint16) ([]byte, uint16, error) {
 	txID := binary.BigEndian.Uint16(idBytes[:])
 
 	var buf bytes.Buffer
-	// Header: ID, Flags (RD=1 -> 0x0100), QDCOUNT=1, ANCOUNT=0, NSCOUNT=0, ARCOUNT=0
 	_ = binary.Write(&buf, binary.BigEndian, txID)
 	_ = binary.Write(&buf, binary.BigEndian, uint16(0x0100))
 	_ = binary.Write(&buf, binary.BigEndian, uint16(1))
@@ -330,10 +389,10 @@ func buildDNSQuery(domain string, qtype uint16) ([]byte, uint16, error) {
 		buf.WriteByte(byte(len(label)))
 		buf.WriteString(label)
 	}
-	buf.WriteByte(0x00) // root label
+	buf.WriteByte(0x00)
 
-	_ = binary.Write(&buf, binary.BigEndian, qtype)     // QTYPE
-	_ = binary.Write(&buf, binary.BigEndian, uint16(1)) // QCLASS IN
+	_ = binary.Write(&buf, binary.BigEndian, qtype)
+	_ = binary.Write(&buf, binary.BigEndian, uint16(1))
 	return buf.Bytes(), txID, nil
 }
 
@@ -360,7 +419,7 @@ func parseDNSResponse(msg []byte, expectedID uint16) ([]string, uint32, error) {
 		if err != nil {
 			return nil, 0, err
 		}
-		offset = next + 4 // QTYPE + QCLASS
+		offset = next + 4
 		if offset > len(msg) {
 			return nil, 0, errors.New("truncated DNS question")
 		}
@@ -436,14 +495,19 @@ func skipDNSName(msg []byte, offset int) (int, error) {
 }
 
 // IsPoisonedOrBogonIP detects ISP censorship sinkhole IPs (such as 10.10.34.34-36 in Iran,
-// 0.0.0.0, loopback, link-local, private RFC1918) returned for public internet domains.
+// CGNAT 100.64.0.0/10 block pages, FakeIP 198.18.0.0/15, loopback, link-local, RFC1918).
 func IsPoisonedOrBogonIP(ip net.IP) bool {
 	if ip == nil || ip.IsUnspecified() || ip.IsLoopback() || ip.IsMulticast() || ip.IsLinkLocalUnicast() {
 		return true
 	}
 	if ip4 := ip.To4(); ip4 != nil {
-		// Iranian DCI censorship block page IPs: 10.10.34.34, 10.10.34.35, 10.10.34.36 (and all RFC1918)
-		if ip4[0] == 10 {
+		if ip4[0] == 10 || ip4[0] == 127 || ip4[0] == 0 {
+			return true
+		}
+		if ip4[0] == 100 && ip4[1] >= 64 && ip4[1] <= 127 {
+			return true
+		}
+		if ip4[0] == 169 && ip4[1] == 254 {
 			return true
 		}
 		if ip4[0] == 172 && ip4[1] >= 16 && ip4[1] <= 31 {
@@ -452,7 +516,7 @@ func IsPoisonedOrBogonIP(ip net.IP) bool {
 		if ip4[0] == 192 && ip4[1] == 168 {
 			return true
 		}
-		if ip4[0] == 127 || ip4[0] == 0 {
+		if ip4[0] == 198 && (ip4[1] == 18 || ip4[1] == 19) {
 			return true
 		}
 	} else if ip.IsPrivate() {

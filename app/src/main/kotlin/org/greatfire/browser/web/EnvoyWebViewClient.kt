@@ -50,9 +50,22 @@ class EnvoyWebViewClient(
 
         val uiState = tunnelManager.uiState.value
 
-        // 1. Strict Kill-Switch enforcement: zero packets escape when VPN is disconnected!
+        // 1. Strict Kill-Switch enforcement: zero packets escape when VPN is disconnected or still connecting!
         if (uiState.state == VpnConnectionState.DISCONNECTED && uiState.killSwitchEnabled) {
             return buildKillSwitchResponse()
+        }
+        if (uiState.state == VpnConnectionState.CONNECTING && uiState.killSwitchEnabled) {
+            if (request.isForMainFrame) {
+                return buildConnectingWaitResponse(uiState.statusDetail)
+            }
+            return WebResourceResponse(
+                "text/plain",
+                "utf-8",
+                503,
+                "Tunnel Connecting",
+                mapOf("Cache-Control" to "no-store"),
+                ByteArrayInputStream(ByteArray(0))
+            )
         }
 
         // 2. Built-in Ad & Tracker domain blocker
@@ -150,6 +163,39 @@ class EnvoyWebViewClient(
         if (request.isForMainFrame) {
             onLoadingStateChanged(view, false)
         }
+    }
+
+    private fun buildConnectingWaitResponse(detail: String): WebResourceResponse {
+        val html = """
+            <!DOCTYPE html>
+            <html dir="rtl" lang="fa">
+            <head>
+            <meta charset="utf-8"/>
+            <meta name="viewport" content="width=device-width,initial-scale=1"/>
+            <style>
+            body{background:#0B1320;color:#F8FAFC;font-family:sans-serif;padding:32px 20px;text-align:center}
+            .box{background:#131F33;border:1px solid #38BDF8;border-radius:16px;padding:24px;max-width:420px;margin:40px auto}
+            h2{color:#38BDF8;margin-top:0;font-size:18px}
+            p{color:#94A3B8;line-height:1.8;font-size:13.5px}
+            </style>
+            </head>
+            <body>
+            <div class="box">
+            <h2>⏳ درحال برقراری تونل امن ضد فیلتر…</h2>
+            <p>${detail.replace("<", "&lt;")}</p>
+            <p>برای جلوگیری از لو رفتن آی‌پی، به محض برقراری کامل VPN این سایت <b>به‌صورت خودکار</b> بارگذاری می‌شود.</p>
+            </div>
+            </body>
+            </html>
+        """.trimIndent()
+        return WebResourceResponse(
+            "text/html",
+            "utf-8",
+            200,
+            "OK",
+            mapOf("Cache-Control" to "no-store"),
+            ByteArrayInputStream(html.toByteArray(Charsets.UTF_8))
+        )
     }
 
     private fun buildKillSwitchResponse(): WebResourceResponse {
