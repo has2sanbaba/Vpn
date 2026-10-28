@@ -7,20 +7,12 @@
     android:orientation="vertical"
     android:padding="16dp">
 
+    <!-- Authentic Chrome Tab Switcher Top Action Bar -->
     <LinearLayout
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
         android:gravity="center_vertical"
         android:orientation="horizontal">
-
-        <TextView
-            android:layout_width="0dp"
-            android:layout_height="wrap_content"
-            android:layout_weight="1"
-            android:text="@string/tabs_title"
-            android:textColor="@color/gf_text_primary"
-            android:textSize="16sp"
-            android:textStyle="bold" />
 
         <com.google.android.material.button.MaterialButton
             android:id="@+id/btnNewTab"
@@ -29,8 +21,8 @@
             android:insetTop="0dp"
             android:insetBottom="0dp"
             android:text="+ تب جدید"
-            android:textSize="12sp"
-            app:cornerRadius="10dp" />
+            android:textSize="12.5sp"
+            app:cornerRadius="19dp" />
 
         <com.google.android.material.button.MaterialButton
             android:id="@+id/btnNewIncognitoTab"
@@ -42,15 +34,30 @@
             android:insetBottom="0dp"
             android:text="🕶 ناشناس"
             android:textColor="@color/gf_accent"
-            android:textSize="12sp"
-            app:cornerRadius="10dp"
+            android:textSize="12.5sp"
+            app:cornerRadius="19dp"
             app:strokeColor="@color/gf_accent" />
+
+        <Space
+            android:layout_width="0dp"
+            android:layout_height="1dp"
+            android:layout_weight="1" />
+
+        <com.google.android.material.button.MaterialButton
+            android:id="@+id/btnCloseAllTabs"
+            style="@style/Widget.MaterialComponents.Button.TextButton"
+            android:layout_width="wrap_content"
+            android:layout_height="38dp"
+            android:minWidth="0dp"
+            android:text="بستن همه"
+            android:textColor="@color/gf_danger"
+            android:textSize="12sp" />
     </LinearLayout>
 
     <androidx.recyclerview.widget.RecyclerView
         android:id="@+id/rvTabs"
         android:layout_width="match_parent"
-        android:layout_height="260dp"
+        android:layout_height="340dp"
         android:layout_marginTop="12dp" />
 
 </LinearLayout>

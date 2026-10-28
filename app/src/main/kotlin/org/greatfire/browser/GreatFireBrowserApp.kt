@@ -2,7 +2,9 @@ package org.greatfire.browser
 
 import android.os.Build
 import android.webkit.WebView
+import androidx.appcompat.app.AppCompatDelegate
 import androidx.multidex.MultiDexApplication
+import org.greatfire.browser.data.BrowserDataStore
 import org.greatfire.browser.vpn.TunnelManager
 
 class GreatFireBrowserApp : MultiDexApplication() {
@@ -11,6 +13,11 @@ class GreatFireBrowserApp : MultiDexApplication() {
         super.onCreate()
         instance = this
 
+        runCatching {
+            val theme = BrowserDataStore.getInstance(this).themeMode
+            AppCompatDelegate.setDefaultNightMode(theme.nightMode)
+        }
+
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
             val proc = getProcessName()
             if (proc != null && proc != packageName) {
@@ -18,7 +25,7 @@ class GreatFireBrowserApp : MultiDexApplication() {
             }
         }
 
-        // Start lightweight GreatFire FreeBrowser/Envoy local engine asynchronously in <25ms (0ms UI block!)
+        // Boot lightweight native proxy & auto-connect to fastest server for user's ISP in background
         TunnelManager.getInstance(this).initializeAutoStart()
     }
 
