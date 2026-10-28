@@ -13,28 +13,38 @@ func main() {
 	listenAddr := flag.String("listen", "127.0.0.1:18080", "Local unified HTTP/SOCKS5 proxy listen address")
 	controlAddr := flag.String("control", "127.0.0.1:18081", "Local HTTP control & telemetry listen address")
 	token := flag.String("token", "", "Shared secret token for control API (X-GF-Token)")
-	mode := flag.String("mode", string(ModeAntiDPI), "Initial routing mode: anti_dpi, socks5, http_proxy, envoy_http, blocked, direct")
+	dataDir := flag.String("data-dir", "", "Directory for persistent method_data.json & nodes_cache.json")
+	mode := flag.String("mode", string(ModeAntiDPI), "Initial routing mode")
 	upstream := flag.String("upstream", "", "Optional upstream proxy host:port")
+	customURI := flag.String("custom-uri", "", "Optional custom vless/trojan/ss/socks5 URI")
 	dohServer := flag.String("doh", "", "Optional custom DoH endpoint")
 	fbConfig := flag.String("fbconfig", "", "Optional path to GreatFire fb.config")
 	fragSize := flag.Int("frag-size", 24, "TLS ClientHello fragment size in bytes")
-	fragDelay := flag.Int("frag-delay", 4, "Inter-fragment delay in milliseconds")
+	fragDelay := flag.Int("frag-delay", 3, "Inter-fragment delay in milliseconds")
 	flag.Parse()
 
 	doh := NewDoHResolver()
 	initialCfg := RuntimeConfig{
 		Mode:         TunnelMode(*mode),
 		UpstreamAddr: *upstream,
+		CustomURI:    *customURI,
 		DoHServer:    *dohServer,
 		FragEnabled:  true,
 		FragSize:     *fragSize,
 		FragDelayMs:  *fragDelay,
 		FbConfigPath: *fbConfig,
-		ProfileName:  "GreatFire Smart Anti-DPI",
+		ProfileName:  "GreatFire Instant Smart Bypass",
 	}
 
 	router := NewUpstreamRouter(doh, initialCfg)
-	gw := NewGatewayServer(router, doh)
+	pool := NewNodePool(doh, *dataDir)
+	if *customURI != "" {
+		_ = pool.SetCustomURI(*customURI)
+	}
+	pool.StartBackground()
+
+	racer := NewConnectionRacer(router, pool, *dataDir)
+	gw := NewGatewayServer(router, doh, pool, racer)
 
 	if *controlAddr != "" {
 		ctrlMux := NewControlMux(gw, router, doh, *token)

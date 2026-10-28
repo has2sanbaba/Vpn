@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <style name="Theme.GreatFireBrowser" parent="Theme.MaterialComponents.DayNight.NoActionBar">
+        <item name="colorPrimary">@color/gf_accent</item>
+        <item name="colorPrimaryVariant">@color/gf_accent_dark</item>
+        <item name="colorOnPrimary">#202124</item>
+        <item name="colorSecondary">@color/gf_accent</item>
+        <item name="colorOnSecondary">#202124</item>
+        <item name="android:statusBarColor">@color/gf_bg_surface</item>
+        <item name="android:windowLightStatusBar">false</item>
+        <item name="android:navigationBarColor">@color/gf_bg_surface</item>
+        <item name="android:windowBackground">@color/gf_bg_primary</item>
+        <item name="bottomSheetDialogTheme">@style/ThemeOverlay.GreatFire.BottomSheet</item>
+    </style>
+</resources>

@@ -12,7 +12,6 @@ import android.webkit.WebViewClient
 import okhttp3.Request
 import org.greatfire.browser.vpn.LegacySslTrustBridge
 import org.greatfire.browser.vpn.TunnelManager
-import org.greatfire.browser.vpn.VpnConnectionState
 import java.io.ByteArrayInputStream
 import java.nio.charset.Charset
 import java.util.Locale
@@ -48,29 +47,9 @@ class EnvoyWebViewClient(
         val scheme = uri.scheme?.lowercase(Locale.ENGLISH) ?: return null
         if (scheme != "http" && scheme != "https") return null
 
-        val uiState = tunnelManager.uiState.value
-
-        // 1. Strict Kill-Switch enforcement: zero packets escape when VPN is disconnected or still connecting!
-        if (uiState.state == VpnConnectionState.DISCONNECTED && uiState.killSwitchEnabled) {
-            return buildKillSwitchResponse()
-        }
-        if (uiState.state == VpnConnectionState.CONNECTING && uiState.killSwitchEnabled) {
-            if (request.isForMainFrame) {
-                return buildConnectingWaitResponse(uiState.statusDetail)
-            }
-            return WebResourceResponse(
-                "text/plain",
-                "utf-8",
-                503,
-                "Tunnel Connecting",
-                mapOf("Cache-Control" to "no-store"),
-                ByteArrayInputStream(ByteArray(0))
-            )
-        }
-
-        // 2. Built-in Ad & Tracker domain blocker
+        // 1. Lightweight built-in Ad & Tracker blocker
         val host = uri.host?.lowercase(Locale.ENGLISH).orEmpty()
-        if (tunnelManager.repository.adBlockEnabled && isBlockedTrackerHost(host)) {
+        if (tunnelManager.adBlockEnabled && isBlockedTrackerHost(host)) {
             return WebResourceResponse(
                 "text/plain",
                 "utf-8",
@@ -81,7 +60,7 @@ class EnvoyWebViewClient(
             )
         }
 
-        // 3. Legacy WebView client-level interception fallback (only when PROXY_OVERRIDE is absent)
+        // 2. Legacy WebView client-level fallback ONLY on very old factory WebViews lacking PROXY_OVERRIDE
         if (WebViewProxyConfigurator.requiresClientInterception &&
             request.method.equals("GET", ignoreCase = true) &&
             !request.requestHeaders.containsKey("Range") &&
@@ -127,7 +106,7 @@ class EnvoyWebViewClient(
 
     override fun onPageStarted(view: WebView, url: String?, favicon: Bitmap?) {
         super.onPageStarted(view, url, favicon)
-        if (tunnelManager.repository.webRtcShieldEnabled) {
+        if (tunnelManager.webRtcShieldEnabled) {
             view.evaluateJavascript(WEBRTC_SHIELD_JS, null)
         }
         if (url != null) {
@@ -146,7 +125,6 @@ class EnvoyWebViewClient(
 
     override fun onReceivedSslError(view: WebView, handler: SslErrorHandler, error: SslError) {
         val host = runCatching { Uri.parse(error.url).host }.getOrNull()
-        // Cryptographically validate ISRG Root X1/X2 on legacy Android 5.0 - 7.0 ONLY
         if (LegacySslTrustBridge.verifyLegacyWebViewSslError(error, host)) {
             handler.proceed()
         } else {
@@ -163,71 +141,6 @@ class EnvoyWebViewClient(
         if (request.isForMainFrame) {
             onLoadingStateChanged(view, false)
         }
-    }
-
-    private fun buildConnectingWaitResponse(detail: String): WebResourceResponse {
-        val html = """
-            <!DOCTYPE html>
-            <html dir="rtl" lang="fa">
-            <head>
-            <meta charset="utf-8"/>
-            <meta name="viewport" content="width=device-width,initial-scale=1"/>
-            <style>
-            body{background:#0B1320;color:#F8FAFC;font-family:sans-serif;padding:32px 20px;text-align:center}
-            .box{background:#131F33;border:1px solid #38BDF8;border-radius:16px;padding:24px;max-width:420px;margin:40px auto}
-            h2{color:#38BDF8;margin-top:0;font-size:18px}
-            p{color:#94A3B8;line-height:1.8;font-size:13.5px}
-            </style>
-            </head>
-            <body>
-            <div class="box">
-            <h2>⏳ درحال برقراری تونل امن ضد فیلتر…</h2>
-            <p>${detail.replace("<", "&lt;")}</p>
-            <p>برای جلوگیری از لو رفتن آی‌پی، به محض برقراری کامل VPN این سایت <b>به‌صورت خودکار</b> بارگذاری می‌شود.</p>
-            </div>
-            </body>
-            </html>
-        """.trimIndent()
-        return WebResourceResponse(
-            "text/html",
-            "utf-8",
-            200,
-            "OK",
-            mapOf("Cache-Control" to "no-store"),
-            ByteArrayInputStream(html.toByteArray(Charsets.UTF_8))
-        )
-    }
-
-    private fun buildKillSwitchResponse(): WebResourceResponse {
-        val html = """
-            <!DOCTYPE html>
-            <html dir="rtl" lang="fa">
-            <head>
-            <meta charset="utf-8"/>
-            <meta name="viewport" content="width=device-width,initial-scale=1"/>
-            <style>
-            body{background:#0B1320;color:#F8FAFC;font-family:sans-serif;padding:32px 20px;text-align:center}
-            .box{background:#131F33;border:1px solid #EF4444;border-radius:16px;padding:24px;max-width:420px;margin:40px auto}
-            h2{color:#EF4444;margin-top:0}
-            p{color:#94A3B8;line-height:1.7;font-size:14px}
-            </style>
-            </head>
-            <body>
-            <div class="box">
-            <h2>🔒 قفل امنیتی Kill-Switch فعال است</h2>
-            <p>برای جلوگیری از لو رفتن آی‌پی و اتصال مستقیم بدون فیلترشکن، بارگذاری سایت مسدود شد.<br/>لطفاً از نوار بالا دکمه <b>VPN</b> را بزنید و تونل GreatFire را روشن کنید.</p>
-            </div>
-            </body>
-            </html>
-        """.trimIndent()
-        return WebResourceResponse(
-            "text/html",
-            "utf-8",
-            503,
-            "Kill-Switch Active",
-            mapOf("Cache-Control" to "no-store"),
-            ByteArrayInputStream(html.toByteArray(Charsets.UTF_8))
-        )
     }
 
     private fun isBlockedTrackerHost(host: String): Boolean {
@@ -251,16 +164,11 @@ class EnvoyWebViewClient(
             "criteo.com"
         )
 
-        // Prevents WebRTC STUN ICE gathering from leaking local/ISP IP addresses outside the proxy
         const val WEBRTC_SHIELD_JS = """
             (function() {
                 try {
-                    const noop = function() { throw new Error('WebRTC disabled by GreatFire Privacy Shield'); };
                     Object.defineProperty(window, 'RTCPeerConnection', { value: undefined, writable: false });
                     Object.defineProperty(window, 'webkitRTCPeerConnection', { value: undefined, writable: false });
-                    if (navigator.mediaDevices && navigator.mediaDevices.getUserMedia) {
-                        // Keep media playback intact, only block raw STUN peer leaks
-                    }
                 } catch (_) {}
             })();
         """

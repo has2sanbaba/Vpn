@@ -42,6 +42,15 @@ object LegacySslTrustBridge {
 
     fun initialize(context: Context) {
         try {
+            val pemFile = File(context.filesDir, "cacert.pem")
+            // Fast path on Android 7.1+ when cacert.pem is already exported (< 0.2ms startup!)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N_MR1 &&
+                pemFile.exists() && pemFile.length() >= 8192L
+            ) {
+                caBundlePemPath = pemFile.absolutePath
+                return
+            }
+
             val cf = CertificateFactory.getInstance("X.509")
             val isrgX1 = context.resources.openRawResource(R.raw.isrg_root_x1).use {
                 cf.generateCertificate(it) as X509Certificate

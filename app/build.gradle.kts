@@ -21,8 +21,8 @@ android {
         // Android 5.0 Lollipop (API 21) -> Android 15/16+ (API 35+)
         minSdk = 21
         targetSdk = 35
-        versionCode = 200
-        versionName = "2.0.0-greatfire"
+        versionCode = 300
+        versionName = "3.0.0"
 
         multiDexEnabled = true
         vectorDrawables.useSupportLibrary = true
@@ -55,9 +55,8 @@ android {
             versionNameSuffix = "-debug"
         }
         release {
-            // Keep JNI classes for Cronet (GEN_JNI) and gomobile IEnvoyProxy intact
-            isMinifyEnabled = false
-            isShrinkResources = false
+            isMinifyEnabled = true
+            isShrinkResources = true
             if (keystorePropsFile.exists()) {
                 signingConfig = signingConfigs.getByName("release")
             } else {
@@ -70,7 +69,7 @@ android {
         }
     }
 
-    // Build Universal APK (all CPUs) + lightweight per-CPU APKs (ARMv7, ARM64, x86, x86_64)
+    // Build lightweight per-CPU APKs (ARMv7, ARM64, x86, x86_64) + Universal APK
     splits {
         abi {
             isEnable = true
@@ -97,18 +96,9 @@ android {
 
     packaging {
         jniLibs {
-            // Required so libgfproxy.so, libwarpplus.so, libsingbox.so, and libsslocal.so
-            // are extracted to nativeLibraryDir with SELinux exec permission on Android 5..16
+            // Extracts single lightweight libgfproxy.so to nativeLibraryDir with exec permission on API 21..35+
             useLegacyPackaging = true
-            keepDebugSymbols += setOf(
-                "**/libcronet*.so",
-                "**/libgojni.so",
-                "**/libsslocal.so",
-                "**/libgfproxy.so",
-                "**/libwarpplus.so",
-                "**/libsingbox.so",
-                "**/libtor.so"
-            )
+            keepDebugSymbols += setOf("**/libgfproxy.so")
         }
         resources {
             excludes += setOf(
@@ -130,43 +120,21 @@ android {
     }
 }
 
-// Automatically fetch GreatFire AARs if not already present when building from Android Studio / CLI
-val ensureGreatFireLibs by tasks.registering(Exec::class) {
-    workingDir = rootProject.projectDir
-    commandLine("bash", "scripts/fetch-greatfire-libs.sh")
-    onlyIf {
-        !file("libs/IEnvoyProxy.aar").exists() ||
-            !file("libs/cronet-108.0.5359.195.aar").exists()
-    }
-}
-
 val ensureNativeGfProxy by tasks.registering(Exec::class) {
     workingDir = rootProject.projectDir
     commandLine("bash", "scripts/build-gfproxy-android.sh")
     onlyIf {
         val abis = listOf("arm64-v8a", "armeabi-v7a", "x86_64", "x86")
-        val bins = listOf("libgfproxy.so", "libwarpplus.so", "libsingbox.so")
-        abis.any { abi -> bins.any { bin -> !file("src/main/jniLibs/$abi/$bin").exists() } }
+        abis.any { abi -> !file("src/main/jniLibs/$abi/libgfproxy.so").exists() }
     }
 }
 
 tasks.matching { it.name == "preBuild" }.configureEach {
-    dependsOn(ensureGreatFireLibs, ensureNativeGfProxy)
+    dependsOn(ensureNativeGfProxy)
 }
 
 dependencies {
     coreLibraryDesugaring("com.android.tools:desugar_jdk_libs:2.1.2")
-
-    // GreatFire Official Android Libraries:
-    // 1. cronet-108.0.5359.195.aar (Patched Chromium Cronet + Envoy + Geneva + ECH + gfw-report/shadowsocks-rust)
-    // 2. IEnvoyProxy.aar e3.5.0 (V2Ray, XRay, Hysteria2, Snowflake, Lyrebird Obfs4/Meek/WebTunnel, MASQUE, ECH, DoH)
-    implementation(files("libs/cronet-108.0.5359.195.aar"))
-    implementation(files("libs/IEnvoyProxy.aar"))
-
-    // Official Guardian Project Tor JNI Client (chains in front of GreatFire IEnvoyProxy Pluggable Transports)
-    implementation("info.guardianproject:tor-android:0.4.8.12")
-    implementation("info.guardianproject:jtorctl:0.4.5.7")
-    implementation("androidx.localbroadcastmanager:localbroadcastmanager:1.1.0")
 
     implementation(platform("org.jetbrains.kotlin:kotlin-bom:2.1.20"))
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.9.0")
@@ -178,13 +146,10 @@ dependencies {
     implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.8.7")
     implementation("androidx.recyclerview:recyclerview:1.3.2")
     implementation("androidx.swiperefreshlayout:swiperefreshlayout:1.1.0")
-    implementation("androidx.constraintlayout:constraintlayout:2.1.4")
     implementation("androidx.webkit:webkit:1.12.1")
     implementation("com.google.android.material:material:1.12.0")
 
-    // Networking & Cronet requirements
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
-    implementation("com.google.protobuf:protobuf-javalite:3.25.5")
 
     testImplementation("junit:junit:4.13.2")
     testImplementation("org.json:json:20240303")

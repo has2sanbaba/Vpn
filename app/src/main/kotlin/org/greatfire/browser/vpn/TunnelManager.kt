@@ -1,678 +1,317 @@
 package org.greatfire.browser.vpn
 
 import android.content.Context
+import android.content.SharedPreferences
 import android.os.Build
 import android.util.Log
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
-import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
+import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
-import org.greatfire.browser.envoy.CronetInterceptor
-import org.greatfire.browser.envoy.CronetNetworking
-import org.greatfire.browser.envoy.EnvoyProxyController
-import org.greatfire.browser.envoy.GfProxyDaemon
-import org.greatfire.browser.envoy.ShadowsocksRunner
-import org.greatfire.browser.envoy.SingBoxRunner
-import org.greatfire.browser.envoy.TorBridgeRunner
-import org.greatfire.browser.envoy.WarpPlusRunner
+import okhttp3.RequestBody.Companion.toRequestBody
 import org.greatfire.browser.web.WebViewProxyConfigurator
+import org.json.JSONObject
+import java.io.File
 import java.net.InetSocketAddress
 import java.net.Proxy
+import java.net.ServerSocket
+import java.net.Socket
+import java.util.UUID
 import java.util.concurrent.TimeUnit
 
-enum class VpnConnectionState {
-    CONNECTING,
-    CONNECTED,
-    DISCONNECTED
-}
-
-data class TunnelUiState(
-    val state: VpnConnectionState = VpnConnectionState.CONNECTING,
-    val activeProfile: ProxyProfile? = null,
+data class GatewayStatus(
+    val ready: Boolean = false,
     val gatewayPort: Int = 0,
-    val latencyMs: Long = -1L,
+    val readyNodes: Int = 0,
+    val bestNode: String = "",
+    val bestProto: String = "",
+    val bestRttMs: Long = 0L,
+    val directWins: Long = 0L,
+    val tunnelWins: Long = 0L,
     val bytesUp: Long = 0L,
     val bytesDown: Long = 0L,
-    val dohQueries: Long = 0L,
-    val blockedLeaks: Long = 0L,
-    val killSwitchEnabled: Boolean = true,
-    val statusDetail: String = "درحال راه‌اندازی موتور ضد فیلتر GreatFire…"
+    val customUri: String = ""
 )
 
+data class ProbeResult(
+    val ok: Boolean,
+    val latencyMs: Long = 0L,
+    val bestNode: String = "",
+    val error: String? = null
+)
+
+/**
+ * Lightweight, zero-wait controller for the native GreatFire FreeBrowser/Envoy Go engine (`libgfproxy.so`).
+ * Boots in <25ms in the background and routes WebView requests immediately without ever blocking navigation.
+ */
 class TunnelManager private constructor(private val appContext: Context) {
 
-    val repository = ProfileRepository(appContext)
-    private val gfDaemon = GfProxyDaemon(appContext)
-    private val iepController = EnvoyProxyController(appContext)
-    private val torBridgeRunner = TorBridgeRunner(appContext, iepController)
-    private val warpRunner = WarpPlusRunner(appContext)
-    private val singBoxRunner = SingBoxRunner(appContext)
-    private val ssRunner = ShadowsocksRunner(appContext)
-
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
-    private val switchMutex = Mutex()
-    private var activeConnectJob: Job? = null
+    private val startMutex = Mutex()
+    private val prefs: SharedPreferences =
+        appContext.getSharedPreferences("gf_chrome_prefs", Context.MODE_PRIVATE)
 
-    private val _uiState = MutableStateFlow(
-        TunnelUiState(
-            killSwitchEnabled = repository.killSwitchEnabled,
-            activeProfile = repository.loadAllProfiles().firstOrNull { it.id == repository.selectedProfileId }
-                ?: repository.builtInProfiles().first()
-        )
-    )
-    val uiState: StateFlow<TunnelUiState> = _uiState.asStateFlow()
+    private val controlToken = UUID.randomUUID().toString()
 
     @Volatile
-    private var proxyClientCache: Pair<Int, OkHttpClient>? = null
+    private var proxyProcess: Process? = null
+
+    @Volatile
+    var gatewayPort: Int = 0
+        private set
+
+    @Volatile
+    private var controlPort: Int = 0
+
+    private val _status = MutableStateFlow(GatewayStatus())
+    val status: StateFlow<GatewayStatus> = _status.asStateFlow()
+
+    var adBlockEnabled: Boolean
+        get() = prefs.getBoolean(KEY_ADBLOCK, true)
+        set(value) = prefs.edit().putBoolean(KEY_ADBLOCK, value).apply()
+
+    var webRtcShieldEnabled: Boolean
+        get() = prefs.getBoolean(KEY_WEBRTC_SHIELD, true)
+        set(value) = prefs.edit().putBoolean(KEY_WEBRTC_SHIELD, value).apply()
+
+    var customProxyUri: String
+        get() = prefs.getString(KEY_CUSTOM_URI, "").orEmpty()
+        private set(value) = prefs.edit().putString(KEY_CUSTOM_URI, value.trim()).apply()
+
+    private val controlHttp = OkHttpClient.Builder()
+        .connectTimeout(2, TimeUnit.SECONDS)
+        .readTimeout(10, TimeUnit.SECONDS)
+        .proxy(Proxy.NO_PROXY)
+        .build()
 
     fun initializeAutoStart() {
         scope.launch {
-            runCatching {
-                val initMode = if (repository.killSwitchEnabled) "blocked" else "direct"
-                val gwPort = gfDaemon.ensureStarted(initialMode = initMode)
-                WebViewProxyConfigurator.applyProxyToWebView(appContext, gwPort)
-                startTelemetryLoop()
-                connect(repository.selectedProfileId)
-            }.onFailure { err ->
-                Log.e(TAG, "Auto-start tunnel error", err)
-                _uiState.value = _uiState.value.copy(
-                    state = VpnConnectionState.DISCONNECTED,
-                    statusDetail = "خطا در راه‌اندازی اولیه: ${err.message}"
-                )
-            }
+            LegacySslTrustBridge.initialize(appContext)
+            ensureDefaultFbConfig()
+            ensureRunning()
+            startWatchdogLoop()
         }
     }
 
-    fun connect(profileId: String = repository.selectedProfileId) {
-        repository.selectedProfileId = profileId
-        activeConnectJob?.cancel()
-        activeConnectJob = scope.launch {
-            connectSelectedProfileInternal()
+    suspend fun ensureRunning(): Boolean = startMutex.withLock {
+        val currentProc = proxyProcess
+        if (currentProc != null && isProcessAliveCompat(currentProc) && gatewayPort > 0) {
+            return@withLock true
         }
-    }
 
-    fun disconnect() {
-        activeConnectJob?.cancel()
+        runCatching { currentProc?.destroy() }
+        proxyProcess = null
+
+        val binFile = findGfProxyBinary() ?: run {
+            Log.e(TAG, "libgfproxy.so not found in nativeLibraryDir")
+            return@withLock false
+        }
+
+        val gwPort = findAvailableLocalPort(18080)
+        val ctrlPort = findAvailableLocalPort(18081)
+        val dataDir = File(appContext.filesDir, "gfproxy").apply { mkdirs() }
+        val fbConfigFile = File(appContext.filesDir, "fb.config")
+
+        val cmd = mutableListOf(
+            binFile.absolutePath,
+            "-listen", "127.0.0.1:$gwPort",
+            "-control", "127.0.0.1:$ctrlPort",
+            "-token", controlToken,
+            "-data-dir", dataDir.absolutePath,
+            "-fbconfig", fbConfigFile.absolutePath
+        )
+        val savedCustom = customProxyUri
+        if (savedCustom.isNotBlank()) {
+            cmd.add("-custom-uri")
+            cmd.add(savedCustom)
+        }
+
+        val pb = ProcessBuilder(cmd).redirectErrorStream(true)
+        pb.directory(dataDir)
+        LegacySslTrustBridge.caBundlePemPath?.let { pemPath ->
+            pb.environment()["SSL_CERT_FILE"] = pemPath
+        }
+        pb.environment()["SSL_CERT_DIR"] = "/apex/com.android.conscrypt/cacerts:/system/etc/security/cacerts"
+
+        val proc = try {
+            pb.start()
+        } catch (t: Throwable) {
+            Log.e(TAG, "Failed starting libgfproxy.so: ${t.message}")
+            return@withLock false
+        }
+
+        // Drain stdout/stderr asynchronously so pipe buffer never blocks Go runtime
         scope.launch {
-            switchMutex.withLock {
-                stopAllSubEngines()
-
-                val killSwitch = repository.killSwitchEnabled
-                val gwPort = runCatching { gfDaemon.ensureStarted() }.getOrDefault(0)
-                if (gwPort > 0) {
-                    val mode = if (killSwitch) "blocked" else "direct"
-                    gfDaemon.updateRouting(
-                        mode = mode,
-                        profileName = if (killSwitch) "Kill-Switch Blocked" else "Direct"
-                    )
-                    WebViewProxyConfigurator.applyProxyToWebView(appContext, gwPort)
-                }
-
-                GreatFireTunnelService.stop(appContext)
-
-                _uiState.value = _uiState.value.copy(
-                    state = VpnConnectionState.DISCONNECTED,
-                    latencyMs = -1L,
-                    killSwitchEnabled = killSwitch,
-                    statusDetail = if (killSwitch) {
-                        "قطع شد • قفل Kill-Switch فعال (هیچ سایتی بدون VPN باز نمی‌شود)"
-                    } else {
-                        "VPN خاموش است (اتصال مستقیم)"
-                    }
-                )
-            }
-        }
-    }
-
-    fun setKillSwitch(enabled: Boolean) {
-        repository.killSwitchEnabled = enabled
-        _uiState.value = _uiState.value.copy(killSwitchEnabled = enabled)
-        if (_uiState.value.state == VpnConnectionState.DISCONNECTED) {
-            disconnect()
-        }
-    }
-
-    private suspend fun stopAllSubEngines() {
-        runCatching { warpRunner.stop() }
-        runCatching { singBoxRunner.stop() }
-        runCatching { torBridgeRunner.stop() }
-        runCatching { iepController.stopActive() }
-        runCatching { ssRunner.stop() }
-    }
-
-    private suspend fun connectSelectedProfileInternal() = switchMutex.withLock {
-        val all = repository.loadAllProfiles()
-        val chosen = all.firstOrNull { it.id == repository.selectedProfileId } ?: all.first()
-
-        _uiState.value = _uiState.value.copy(
-            state = VpnConnectionState.CONNECTING,
-            activeProfile = chosen,
-            latencyMs = -1L,
-            killSwitchEnabled = repository.killSwitchEnabled,
-            statusDetail = "درحال اتصال به ${chosen.name}…"
-        )
-
-        try {
-            val initMode = if (repository.killSwitchEnabled) "blocked" else "direct"
-            val gwPort = gfDaemon.ensureStarted(initialMode = initMode)
-            if (repository.killSwitchEnabled) {
-                gfDaemon.updateRouting(mode = "blocked", profileName = "Connecting Kill-Switch")
-            }
-            WebViewProxyConfigurator.applyProxyToWebView(appContext, gwPort)
-
-            stopAllSubEngines()
-
-            if (chosen.kind == TransportKind.SMART_AUTO) {
-                connectSmartAutoCascade(chosen, gwPort)
-                return@withLock
-            }
-
-            activateSingleProfile(chosen, gwPort)
-
-            updateStatusDetail("درحال تست باز شدن واقعی یوتیوب و سایت‌های فیلتر…")
-            val probeTimeout = when (chosen.kind) {
-                TransportKind.TOR_MEEK_BRIDGE,
-                TransportKind.SNOWFLAKE,
-                TransportKind.TOR_OBFS4_BRIDGE,
-                TransportKind.LYREBIRD_PT -> 18_000
-                else -> 12_000
-            }
-            val probe = gfDaemon.verifyRealCensorshipBypass(timeoutMs = probeTimeout)
-            if (!probe.ok && chosen.kind != TransportKind.FREEBROWSER_ANTI_DPI && chosen.kind != TransportKind.CRONET_GENEVA) {
-                throw IllegalStateException(
-                    probe.error ?: "سرور پاسخ نداد یا قادر به عبور از فیلترینگ نبود (HTTP ${probe.statusCode})"
-                )
-            }
-
-            GreatFireTunnelService.start(appContext, chosen.name)
-
-            if (probe.ok && probe.latencyMs > 0) {
-                repository.updateLatency(chosen.id, probe.latencyMs)
-            }
-
-            _uiState.value = _uiState.value.copy(
-                state = VpnConnectionState.CONNECTED,
-                activeProfile = chosen,
-                gatewayPort = gwPort,
-                latencyMs = if (probe.ok) probe.latencyMs else -1L,
-                statusDetail = "متصل • ${chosen.kind.badge}"
-            )
-        } catch (t: Throwable) {
-            Log.e(TAG, "Failed connecting profile ${chosen.name}", t)
-            stopAllSubEngines()
-            if (repository.killSwitchEnabled) {
-                runCatching { gfDaemon.updateRouting(mode = "blocked", profileName = "Error Kill-Switch") }
-            }
-            _uiState.value = _uiState.value.copy(
-                state = VpnConnectionState.DISCONNECTED,
-                latencyMs = -1L,
-                statusDetail = "خطا در اتصال (${chosen.name}): ${t.message}"
-            )
-        }
-    }
-
-    /**
-     * Multi-Engine Zero-Config Failover Cascade (`SMART_AUTO`):
-     * Automatically tests real remote IP-hiding anti-censorship tunnels in fastest-first order
-     * and ONLY transitions to `CONNECTED` once `https://www.youtube.com/generate_204` (or `x.com`)
-     * genuinely succeeds through the tunnel!
-     */
-    private suspend fun connectSmartAutoCascade(smartProfile: ProxyProfile, gwPort: Int) {
-        val builtIns = repository.builtInProfiles().associateBy { it.id }
-        val customVerified = repository.loadCustomProfiles()
-            .filter { it.lastLatencyMs in 1..2800 }
-            .sortedBy { it.lastLatencyMs }
-            .take(2)
-
-        val primaryStages = buildList {
-            addAll(customVerified)
-            builtIns[ProfileRepository.ID_WARP_CLEAN]?.let { add(it) }
-            builtIns[ProfileRepository.ID_WARP_GOOL]?.let { add(it) }
-            builtIns[ProfileRepository.ID_WARP_PSIPHON]?.let { add(it) }
-        }
-
-        for ((idx, stage) in primaryStages.withIndex()) {
-            val ok = tryCandidateStage(
-                smartProfile = smartProfile,
-                candidate = stage,
-                gwPort = gwPort,
-                stepLabel = "[${idx + 1}/${primaryStages.size + 3}]"
-            )
-            if (ok) return
-        }
-
-        // Stage: Auto-fetch fresh VLESS-Reality / Trojan / Hysteria2 community servers over Anti-DPI + DoH!
-        updateStatusDetail("درحال دریافت خودکار سرورهای جدید VLESS-Reality / Trojan…")
-        val autoServers = runCatching {
-            gfDaemon.updateRouting(
-                mode = "anti_dpi",
-                fragEnabled = true,
-                fragSize = 14,
-                fragDelayMs = 4,
-                profileName = "AutoFetch Bootstrap"
-            )
-            val fetched = SubscriptionAutoFetcher.fetchFreshPublicProfiles(gwPort, maxProfiles = 12)
-            if (repository.killSwitchEnabled) {
-                gfDaemon.updateRouting(mode = "blocked", profileName = "Connecting Kill-Switch")
-            }
-            if (fetched.isNotEmpty()) {
-                repository.addCustomProfiles(fetched)
-            }
-            fetched.take(4)
-        }.getOrDefault(emptyList())
-
-        for (srv in autoServers) {
-            if (tryCandidateStage(smartProfile, srv, gwPort, "[سرور خودکار]")) {
-                return
-            }
-        }
-
-        // Stage: TCP/443 HTTPS Domain-Fronted & WebRTC Tor + GreatFire Pluggable Transports (works even when ALL UDP is blocked!)
-        val torFallbacks = listOfNotNull(
-            builtIns[ProfileRepository.ID_TOR_MEEK],
-            builtIns[ProfileRepository.ID_TOR_SNOWFLAKE],
-            builtIns[ProfileRepository.ID_TOR_OBFS4]
-        )
-        for (torStage in torFallbacks) {
-            if (tryCandidateStage(smartProfile, torStage, gwPort, "[پل اضطراری Tor]", probeTimeoutMs = 18_000)) {
-                return
-            }
-        }
-
-        stopAllSubEngines()
-        if (repository.killSwitchEnabled) {
-            gfDaemon.updateRouting(mode = "blocked", profileName = "Error Kill-Switch")
-        }
-        _uiState.value = _uiState.value.copy(
-            state = VpnConnectionState.DISCONNECTED,
-            latencyMs = -1L,
-            statusDetail = "همه موتورهای خودکار روی این اینترنت مسدود بودند • از بخش VPN یک کانفیگ VLESS/Trojan وارد کنید"
-        )
-    }
-
-    private suspend fun tryCandidateStage(
-        smartProfile: ProxyProfile,
-        candidate: ProxyProfile,
-        gwPort: Int,
-        stepLabel: String,
-        probeTimeoutMs: Int = 11_000
-    ): Boolean {
-        return try {
-            stopAllSubEngines()
-            updateStatusDetail("$stepLabel تلاش با ${candidate.name}…")
-            activateSingleProfile(candidate, gwPort)
-
-            updateStatusDetail("$stepLabel تست باز شدن واقعی یوتیوب با ${candidate.name}…")
-            val probe = gfDaemon.verifyRealCensorshipBypass(timeoutMs = probeTimeoutMs)
-            if (!probe.ok) {
-                Log.w(TAG, "SmartAuto stage ${candidate.name} failed real censorship probe: ${probe.error}")
-                false
-            } else {
-                repository.updateLatency(smartProfile.id, probe.latencyMs)
-                repository.updateLatency(candidate.id, probe.latencyMs)
-                GreatFireTunnelService.start(appContext, candidate.name)
-
-                _uiState.value = _uiState.value.copy(
-                    state = VpnConnectionState.CONNECTED,
-                    activeProfile = smartProfile.copy(lastLatencyMs = probe.latencyMs),
-                    gatewayPort = gwPort,
-                    latencyMs = probe.latencyMs,
-                    statusDetail = "متصل • ${candidate.name}"
-                )
-                Log.i(TAG, "SmartAuto connected via ${candidate.name} (${probe.latencyMs}ms)")
-                true
-            }
-        } catch (t: Throwable) {
-            Log.w(TAG, "SmartAuto stage ${candidate.name} error: ${t.message}")
-            false
-        }
-    }
-
-    private suspend fun activateSingleProfile(chosen: ProxyProfile, gwPort: Int) {
-        when (chosen.kind) {
-            TransportKind.WARP_CLEAN_SCAN -> {
-                val localProxy = withContext(Dispatchers.IO) {
-                    warpRunner.start(
-                        mode = WarpPlusRunner.WarpMode.CLEAN_SCAN,
-                        customEndpoint = chosen.extra["endpoint"].orEmpty(),
-                        onStatusLine = { updateStatusDetail(it) }
-                    )
-                }
-                gfDaemon.updateRouting(
-                    mode = "socks5",
-                    upstreamAddr = localProxy,
-                    profileName = chosen.name
-                )
-                CronetNetworking.initializeEngine(appContext, "socks5://127.0.0.1:$gwPort")
-            }
-
-            TransportKind.WARP_IN_WARP_GOOL -> {
-                val localProxy = withContext(Dispatchers.IO) {
-                    warpRunner.start(
-                        mode = WarpPlusRunner.WarpMode.WARP_IN_WARP_GOOL,
-                        customEndpoint = chosen.extra["endpoint"].orEmpty(),
-                        onStatusLine = { updateStatusDetail(it) }
-                    )
-                }
-                gfDaemon.updateRouting(
-                    mode = "socks5",
-                    upstreamAddr = localProxy,
-                    profileName = chosen.name
-                )
-                CronetNetworking.initializeEngine(appContext, "socks5://127.0.0.1:$gwPort")
-            }
-
-            TransportKind.WARP_PSIPHON_CFON -> {
-                val cc = chosen.extra["country"]?.ifBlank { null } ?: "DE"
-                val localProxy = withContext(Dispatchers.IO) {
-                    warpRunner.start(
-                        mode = WarpPlusRunner.WarpMode.PSIPHON_CFON,
-                        countryCode = cc,
-                        customEndpoint = chosen.extra["endpoint"].orEmpty(),
-                        onStatusLine = { updateStatusDetail(it) }
-                    )
-                }
-                gfDaemon.updateRouting(
-                    mode = "socks5",
-                    upstreamAddr = localProxy,
-                    profileName = chosen.name
-                )
-                CronetNetworking.initializeEngine(appContext, "socks5://127.0.0.1:$gwPort")
-            }
-
-            TransportKind.TOR_MEEK_BRIDGE,
-            TransportKind.SNOWFLAKE,
-            TransportKind.TOR_OBFS4_BRIDGE,
-            TransportKind.LYREBIRD_PT -> {
-                val torSocksAddr = torBridgeRunner.start(
-                    profile = chosen,
-                    onStatusLine = { updateStatusDetail(it) }
-                )
-                gfDaemon.updateRouting(
-                    mode = "socks5",
-                    upstreamAddr = torSocksAddr,
-                    profileName = chosen.name
-                )
-                CronetNetworking.initializeEngine(appContext, "socks5://127.0.0.1:$gwPort")
-            }
-
-            TransportKind.VLESS,
-            TransportKind.TROJAN,
-            TransportKind.TUIC,
-            TransportKind.WIREGUARD -> {
-                val sbAddr = withContext(Dispatchers.IO) { singBoxRunner.start(chosen) }
-                gfDaemon.updateRouting(
-                    mode = "socks5",
-                    upstreamAddr = sbAddr,
-                    profileName = chosen.name
-                )
-                CronetNetworking.initializeEngine(appContext, "socks5://127.0.0.1:$gwPort")
-            }
-
-            TransportKind.HYSTERIA2 -> {
-                val addr = withContext(Dispatchers.IO) {
-                    if (chosen.password.isNotBlank()) {
-                        runCatching { singBoxRunner.start(chosen) }
-                            .getOrElse { iepController.startTransport(chosen).localAddr }
-                    } else {
-                        iepController.startTransport(chosen).localAddr
-                    }
-                }
-                gfDaemon.updateRouting(
-                    mode = "socks5",
-                    upstreamAddr = addr,
-                    profileName = chosen.name
-                )
-                CronetNetworking.initializeEngine(appContext, "socks5://127.0.0.1:$gwPort")
-            }
-
-            TransportKind.V2RAY_WS,
-            TransportKind.V2RAY_HTTP -> {
-                val addr = withContext(Dispatchers.IO) {
-                    if (chosen.extra["engine"] == "iep") {
-                        iepController.startTransport(chosen).localAddr
-                    } else {
-                        runCatching { singBoxRunner.start(chosen) }
-                            .getOrElse { iepController.startTransport(chosen).localAddr }
-                    }
-                }
-                gfDaemon.updateRouting(
-                    mode = "socks5",
-                    upstreamAddr = addr,
-                    profileName = chosen.name
-                )
-                CronetNetworking.initializeEngine(appContext, "socks5://127.0.0.1:$gwPort")
-            }
-
-            TransportKind.SHADOWSOCKS -> {
-                val localSocks = withContext(Dispatchers.IO) {
-                    if (chosen.username.startsWith("2022-")) {
-                        singBoxRunner.start(chosen)
-                    } else {
-                        runCatching { ssRunner.start(chosen.rawUri) }
-                            .getOrElse { singBoxRunner.start(chosen) }
-                    }
-                }
-                CronetNetworking.initializeEngine(appContext, "socks5://$localSocks")
-                gfDaemon.updateRouting(
-                    mode = "socks5",
-                    upstreamAddr = localSocks,
-                    profileName = chosen.name
-                )
-            }
-
-            TransportKind.FREEBROWSER_ANTI_DPI -> {
-                CronetNetworking.initializeEngine(
-                    context = appContext,
-                    envoyUrl = "socks5://127.0.0.1:$gwPort",
-                    genevaStrategy = 0
-                )
-                gfDaemon.updateRouting(
-                    mode = "anti_dpi",
-                    fragEnabled = true,
-                    fragSize = chosen.fragSize,
-                    fragDelayMs = chosen.fragDelayMs,
-                    dohServer = chosen.dohServer,
-                    profileName = chosen.name
-                )
-            }
-
-            TransportKind.CRONET_GENEVA -> {
-                CronetNetworking.initializeEngine(
-                    context = appContext,
-                    envoyUrl = chosen.envoyUrl.ifBlank { "socks5://127.0.0.1:$gwPort" },
-                    genevaStrategy = if (chosen.genevaStrategy > 0) chosen.genevaStrategy else 2
-                )
-                gfDaemon.updateRouting(
-                    mode = "anti_dpi",
-                    fragEnabled = true,
-                    fragSize = chosen.fragSize,
-                    fragDelayMs = chosen.fragDelayMs,
-                    profileName = chosen.name
-                )
-            }
-
-            TransportKind.ENVOY_URL -> {
-                CronetNetworking.initializeEngine(appContext, chosen.rawUri)
-                gfDaemon.updateRouting(
-                    mode = "envoy_http",
-                    envoyUrl = chosen.envoyUrl,
-                    envoyAddress = chosen.envoyAddress,
-                    envoyHostHdr = chosen.frontHost,
-                    fragEnabled = true,
-                    profileName = chosen.name
-                )
-            }
-
-            TransportKind.SOCKS5 -> {
-                val addr = "${chosen.host}:${chosen.port}"
-                gfDaemon.updateRouting(
-                    mode = "socks5",
-                    upstreamAddr = addr,
-                    upstreamUser = chosen.username,
-                    upstreamPass = chosen.password,
-                    profileName = chosen.name
-                )
-                CronetNetworking.initializeEngine(appContext, "socks5://127.0.0.1:$gwPort")
-            }
-
-            TransportKind.HTTP_PROXY -> {
-                val addr = "${chosen.host}:${chosen.port}"
-                gfDaemon.updateRouting(
-                    mode = "http_proxy",
-                    upstreamAddr = addr,
-                    upstreamUser = chosen.username,
-                    upstreamPass = chosen.password,
-                    profileName = chosen.name
-                )
-                CronetNetworking.initializeEngine(appContext, "socks5://127.0.0.1:$gwPort")
-            }
-
-            TransportKind.V2RAY_SRTP,
-            TransportKind.V2RAY_WECHAT,
-            TransportKind.XRAY_XHTTP,
-            TransportKind.MASQUE,
-            TransportKind.ENVOY_ECH -> {
-                val started = withContext(Dispatchers.IO) { iepController.startTransport(chosen) }
-                if (started.upstreamMode == "envoy_http") {
-                    gfDaemon.updateRouting(
-                        mode = "envoy_http",
-                        envoyUrl = started.localAddr,
-                        profileName = chosen.name
-                    )
-                } else {
-                    gfDaemon.updateRouting(
-                        mode = started.upstreamMode,
-                        upstreamAddr = started.localAddr,
-                        profileName = chosen.name
-                    )
-                }
-                CronetNetworking.initializeEngine(appContext, "socks5://127.0.0.1:$gwPort")
-            }
-
-            TransportKind.SMART_AUTO -> Unit
-        }
-    }
-
-    private fun updateStatusDetail(msg: String) {
-        if (_uiState.value.state == VpnConnectionState.CONNECTING) {
-            _uiState.value = _uiState.value.copy(statusDetail = msg)
-        }
-    }
-
-    suspend fun runActiveProbe(): GfProxyDaemon.ProbeResult = withContext(Dispatchers.IO) {
-        val result = gfDaemon.verifyRealCensorshipBypass(timeoutMs = 12_000)
-        val activeId = _uiState.value.activeProfile?.id
-        if (result.ok && result.latencyMs >= 0 && activeId != null) {
-            repository.updateLatency(activeId, result.latencyMs)
-            _uiState.value = _uiState.value.copy(latencyMs = result.latencyMs)
-        }
-        result
-    }
-
-    /**
-     * One-tap fetch of fresh public VLESS-Reality, Trojan, and Hysteria2 servers over our
-     * Anti-DPI / Tunnel gateway.
-     */
-    suspend fun fetchPublicFreeServers(): Result<Int> = withContext(Dispatchers.IO) {
-        runCatching {
-            val gwPort = gfDaemon.ensureStarted()
-            val wasDisconnected = _uiState.value.state != VpnConnectionState.CONNECTED
-            if (wasDisconnected) {
-                gfDaemon.updateRouting(
-                    mode = "anti_dpi",
-                    fragEnabled = true,
-                    fragSize = 14,
-                    fragDelayMs = 4,
-                    profileName = "AutoFetch Anti-DPI"
-                )
-            }
-            val fetched = try {
-                SubscriptionAutoFetcher.fetchFreshPublicProfiles(gwPort, maxProfiles = 25)
-            } finally {
-                if (wasDisconnected && repository.killSwitchEnabled) {
-                    gfDaemon.updateRouting(mode = "blocked", profileName = "Kill-Switch Blocked")
-                }
-            }
-            if (fetched.isEmpty()) {
-                throw IllegalStateException("دریافت سرورهای عمومی ناموفق بود؛ اتصال اینترنت را بررسی کنید")
-            }
-            repository.addCustomProfiles(fetched)
-        }
-    }
-
-    /**
-     * Fetches a remote subscription URL THROUGH our active Anti-DPI/Tunnel gateway so even
-     * blocked GitHub raw or Cloudflare Worker links download without external VPN!
-     */
-    suspend fun importSubscriptionUrl(subUrl: String, labelPrefix: String = ""): Result<Int> =
-        withContext(Dispatchers.IO) {
             runCatching {
-                val gwPort = gfDaemon.ensureStarted()
-                val wasDisconnected = _uiState.value.state != VpnConnectionState.CONNECTED
-                if (wasDisconnected) {
-                    gfDaemon.updateRouting(
-                        mode = "anti_dpi",
-                        fragEnabled = true,
-                        fragSize = 14,
-                        fragDelayMs = 4,
-                        profileName = "SubImport Anti-DPI"
-                    )
+                proc.inputStream.bufferedReader().useLines { lines ->
+                    lines.forEach { line -> Log.d(TAG, line) }
                 }
-                val body = try {
-                    val client = getTunneledOkHttpClient()
-                    val req = Request.Builder()
-                        .url(subUrl.trim())
-                        .header("User-Agent", "GreatFireEnvoyBrowser/2.0")
-                        .build()
-                    client.newCall(req).execute().use { resp ->
-                        if (!resp.isSuccessful) {
-                            throw IllegalStateException("HTTP ${resp.code} while fetching subscription")
-                        }
-                        resp.body?.string().orEmpty()
-                    }
-                } finally {
-                    if (wasDisconnected && repository.killSwitchEnabled) {
-                        gfDaemon.updateRouting(mode = "blocked", profileName = "Kill-Switch Blocked")
-                    }
-                }
-                val parsed = ProxyProfileParser.parseMany(body, labelPrefix)
-                if (parsed.isEmpty()) {
-                    throw IllegalArgumentException("هیچ کانفیگ معتبری در لینک اشتراک یافت نشد")
-                }
-                repository.addCustomProfiles(parsed)
             }
         }
+
+        // Wait up to 400ms (polling every 12ms) for TCP bind — usually ready in <20ms!
+        var listening = false
+        repeat(34) {
+            if (isLocalPortOpen(gwPort)) {
+                listening = true
+                return@repeat
+            }
+            delay(12)
+        }
+
+        if (!listening) {
+            Log.w(TAG, "libgfproxy port $gwPort slow to bind, continuing...")
+        }
+
+        proxyProcess = proc
+        gatewayPort = gwPort
+        controlPort = ctrlPort
+
+        WebViewProxyConfigurator.applyProxyToWebView(appContext, gwPort)
+        _status.value = _status.value.copy(
+            ready = true,
+            gatewayPort = gwPort,
+            customUri = savedCustom
+        )
+        true
+    }
+
+    private fun startWatchdogLoop() {
+        scope.launch {
+            while (true) {
+                delay(4000)
+                val p = proxyProcess
+                if (p == null || !isProcessAliveCompat(p)) {
+                    ensureRunning()
+                }
+                pollStatusOnce()
+            }
+        }
+    }
+
+    suspend fun pollStatusOnce(): GatewayStatus? = withContext(Dispatchers.IO) {
+        val cPort = controlPort
+        if (cPort <= 0) return@withContext null
+        return@withContext try {
+            val req = Request.Builder()
+                .url("http://127.0.0.1:$cPort/status")
+                .header("X-GF-Token", controlToken)
+                .build()
+            controlHttp.newCall(req).execute().use { resp ->
+                if (!resp.isSuccessful) return@use null
+                val json = JSONObject(resp.body?.string().orEmpty())
+                val st = GatewayStatus(
+                    ready = json.optBoolean("ok", true),
+                    gatewayPort = gatewayPort,
+                    readyNodes = json.optInt("ready_nodes", 0),
+                    bestNode = json.optString("best_node", ""),
+                    bestProto = json.optString("best_proto", ""),
+                    bestRttMs = json.optLong("best_rtt_ms", 0L),
+                    directWins = json.optLong("direct_wins", 0L),
+                    tunnelWins = json.optLong("tunnel_wins", 0L),
+                    bytesUp = json.optLong("bytes_up", 0L),
+                    bytesDown = json.optLong("bytes_down", 0L),
+                    customUri = customProxyUri
+                )
+                _status.value = st
+                st
+            }
+        } catch (_: Throwable) {
+            null
+        }
+    }
+
+    suspend fun updateCustomProxy(uriInput: String): Result<Unit> = withContext(Dispatchers.IO) {
+        ensureRunning()
+        val cPort = controlPort
+        if (cPort <= 0) return@withContext Result.failure(IllegalStateException("موتور پروکسی آماده نیست"))
+
+        val cleanUri = uriInput.trim()
+        val payload = JSONObject().apply {
+            put("mode", "anti_dpi")
+            put("frag_enabled", true)
+            put("frag_size", 24)
+            put("frag_delay_ms", 3)
+            put("custom_uri", cleanUri)
+        }
+
+        return@withContext try {
+            val req = Request.Builder()
+                .url("http://127.0.0.1:$cPort/config")
+                .header("X-GF-Token", controlToken)
+                .post(payload.toString().toRequestBody("application/json".toMediaType()))
+                .build()
+            controlHttp.newCall(req).execute().use { resp ->
+                val bodyStr = resp.body?.string().orEmpty()
+                if (!resp.isSuccessful) {
+                    return@use Result.failure(IllegalArgumentException(bodyStr.ifBlank { "لینک نامعتبر است" }))
+                }
+                customProxyUri = cleanUri
+                pollStatusOnce()
+                Result.success(Unit)
+            }
+        } catch (t: Throwable) {
+            Result.failure(t)
+        }
+    }
+
+    suspend fun refreshNodesNow() = withContext(Dispatchers.IO) {
+        val cPort = controlPort
+        if (cPort <= 0) return@withContext
+        runCatching {
+            val req = Request.Builder()
+                .url("http://127.0.0.1:$cPort/refresh")
+                .header("X-GF-Token", controlToken)
+                .post("".toRequestBody(null))
+                .build()
+            controlHttp.newCall(req).execute().close()
+        }
+    }
+
+    suspend fun runActiveProbe(): ProbeResult = withContext(Dispatchers.IO) {
+        ensureRunning()
+        val cPort = controlPort
+        if (cPort <= 0) return@withContext ProbeResult(false, error = "پروکسی داخلی آماده نیست")
+
+        return@withContext try {
+            val req = Request.Builder()
+                .url("http://127.0.0.1:$cPort/probe?timeout_ms=8000")
+                .header("X-GF-Token", controlToken)
+                .build()
+            controlHttp.newCall(req).execute().use { resp ->
+                val obj = JSONObject(resp.body?.string().orEmpty())
+                ProbeResult(
+                    ok = obj.optBoolean("ok", false),
+                    latencyMs = obj.optLong("latency_ms", 0L),
+                    bestNode = obj.optString("best_node", ""),
+                    error = obj.optString("error", "").ifBlank { null }
+                )
+            }
+        } catch (t: Throwable) {
+            ProbeResult(false, error = t.message)
+        }
+    }
 
     fun getTunneledOkHttpClient(): OkHttpClient {
-        val gwPort = runCatching { gfDaemon.ensureStarted() }.getOrDefault(0)
-        proxyClientCache?.let { (cachedPort, cachedClient) ->
-            if (cachedPort == gwPort) return cachedClient
-        }
-
+        val port = gatewayPort
         val builder = OkHttpClient.Builder()
             .connectTimeout(15, TimeUnit.SECONDS)
             .readTimeout(25, TimeUnit.SECONDS)
             .followRedirects(true)
             .followSslRedirects(true)
-
-        if (gwPort > 0) {
-            builder.proxy(Proxy(Proxy.Type.HTTP, InetSocketAddress("127.0.0.1", gwPort)))
-        } else {
-            builder.addInterceptor(CronetInterceptor())
+        if (port > 0) {
+            builder.proxy(Proxy(Proxy.Type.HTTP, InetSocketAddress("127.0.0.1", port)))
         }
-
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.N_MR1) {
             val sf = LegacySslTrustBridge.sslSocketFactory
             val tm = LegacySslTrustBridge.trustManager
@@ -680,37 +319,73 @@ class TunnelManager private constructor(private val appContext: Context) {
                 builder.sslSocketFactory(sf, tm)
             }
         }
-
-        val client = builder.build()
-        proxyClientCache = gwPort to client
-        return client
+        return builder.build()
     }
 
-    private fun startTelemetryLoop() {
-        scope.launch {
-            while (isActive) {
-                delay(2000L)
-                val status = gfDaemon.fetchStatus() ?: continue
-                val cur = _uiState.value
-                _uiState.value = cur.copy(
-                    bytesUp = status.bytesUp,
-                    bytesDown = status.bytesDown,
-                    dohQueries = status.dohQueries,
-                    blockedLeaks = status.blockedRequests
-                )
+    private fun findGfProxyBinary(): File? {
+        val nativeDir = File(appContext.applicationInfo.nativeLibraryDir)
+        val candidate = File(nativeDir, "libgfproxy.so")
+        if (candidate.exists()) {
+            candidate.setExecutable(true)
+            return candidate
+        }
+        return null
+    }
+
+    private fun ensureDefaultFbConfig() {
+        runCatching {
+            val out = File(appContext.filesDir, "fb.config")
+            if (!out.exists()) {
+                appContext.assets.open("fb.config").use { input ->
+                    out.outputStream().use { output -> input.copyTo(output) }
+                }
+            }
+        }
+    }
+
+    private fun findAvailableLocalPort(preferred: Int): Int {
+        runCatching {
+            ServerSocket(preferred).use { return preferred }
+        }
+        return ServerSocket(0).use { it.localPort }
+    }
+
+    private fun isLocalPortOpen(port: Int): Boolean {
+        return try {
+            Socket().use { s ->
+                s.connect(InetSocketAddress("127.0.0.1", port), 60)
+                true
+            }
+        } catch (_: Throwable) {
+            false
+        }
+    }
+
+    private fun isProcessAliveCompat(proc: Process): Boolean {
+        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            proc.isAlive
+        } else {
+            try {
+                proc.exitValue()
+                false
+            } catch (_: IllegalThreadStateException) {
+                true
             }
         }
     }
 
     companion object {
-        private const val TAG = "TunnelManager"
+        private const val TAG = "GFProxyEngine"
+        private const val KEY_ADBLOCK = "adblock_enabled"
+        private const val KEY_WEBRTC_SHIELD = "webrtc_shield_enabled"
+        private const val KEY_CUSTOM_URI = "custom_proxy_uri"
 
         @Volatile
-        private var instance: TunnelManager? = null
+        private var INSTANCE: TunnelManager? = null
 
         fun getInstance(context: Context): TunnelManager {
-            return instance ?: synchronized(this) {
-                instance ?: TunnelManager(context.applicationContext).also { instance = it }
+            return INSTANCE ?: synchronized(this) {
+                INSTANCE ?: TunnelManager(context.applicationContext).also { INSTANCE = it }
             }
         }
     }

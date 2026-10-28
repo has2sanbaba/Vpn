@@ -3,6 +3,7 @@ package org.greatfire.browser.web
 import android.annotation.SuppressLint
 import android.content.Context
 import android.os.Build
+import android.view.View
 import android.view.ViewGroup
 import android.webkit.CookieManager
 import android.webkit.DownloadListener
@@ -18,7 +19,7 @@ import java.util.UUID
 data class BrowserTab(
     val id: String = UUID.randomUUID().toString(),
     val incognito: Boolean = false,
-    var title: String = "صفحه اصلی GreatFire",
+    var title: String = "تب جدید",
     var currentUrl: String = BrowserTabManager.HOME_URL,
     var desktopMode: Boolean = false,
     val webView: WebView
@@ -29,7 +30,9 @@ class BrowserTabManager(
     private val tunnelManager: TunnelManager,
     private val onTabStateUpdated: () -> Unit,
     private val onProgressChanged: (Int) -> Unit,
-    private val onDownloadRequested: (url: String, userAgent: String, contentDisposition: String, mimeType: String) -> Unit
+    private val onDownloadRequested: (url: String, userAgent: String, contentDisposition: String, mimeType: String) -> Unit,
+    private val onEnterFullscreen: ((View, WebChromeClient.CustomViewCallback) -> Unit)? = null,
+    private val onExitFullscreen: (() -> Unit)? = null
 ) {
     private val _tabs = mutableListOf<BrowserTab>()
     val tabs: List<BrowserTab> get() = _tabs
@@ -75,15 +78,14 @@ class BrowserTabManager(
         }
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            settings.safeBrowsingEnabled = false // Prevent direct Google SafeBrowsing leaks outside proxy
+            settings.safeBrowsingEnabled = false
         }
 
         val cookieManager = CookieManager.getInstance()
         cookieManager.setAcceptCookie(!incognito)
         cookieManager.setAcceptThirdPartyCookies(webView, false)
 
-        // Inject document-start WebRTC IP-leak shield on modern WebViews
-        if (tunnelManager.repository.webRtcShieldEnabled &&
+        if (tunnelManager.webRtcShieldEnabled &&
             WebViewFeature.isFeatureSupported(WebViewFeature.DOCUMENT_START_SCRIPT)
         ) {
             runCatching {
@@ -121,6 +123,22 @@ class BrowserTabManager(
                     onTabStateUpdated()
                 }
             }
+
+            override fun onShowCustomView(view: View?, callback: CustomViewCallback?) {
+                if (view != null && callback != null && onEnterFullscreen != null) {
+                    onEnterFullscreen.invoke(view, callback)
+                } else {
+                    super.onShowCustomView(view, callback)
+                }
+            }
+
+            override fun onHideCustomView() {
+                if (onExitFullscreen != null) {
+                    onExitFullscreen.invoke()
+                } else {
+                    super.onHideCustomView()
+                }
+            }
         }
 
         webView.setDownloadListener(DownloadListener { url, ua, cd, mime, _ ->
@@ -131,7 +149,7 @@ class BrowserTabManager(
 
         tabRef = BrowserTab(
             incognito = incognito,
-            title = if (incognito) "🕶 تب ناشناس" else "صفحه اصلی GreatFire",
+            title = if (incognito) "تب ناشناس" else "تب جدید",
             currentUrl = initialUrl,
             webView = webView
         )
@@ -213,6 +231,6 @@ class BrowserTabManager(
     companion object {
         const val HOME_URL = "gf://home"
         private const val DESKTOP_UA =
-            "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36"
+            "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36"
     }
 }

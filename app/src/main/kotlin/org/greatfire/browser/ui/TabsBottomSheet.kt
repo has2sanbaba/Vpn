@@ -88,7 +88,7 @@ class TabsBottomSheet : BottomSheetDialogFragment() {
             val incog = if (tab.incognito) "🕶 " else ""
             holder.b.tvTabTitle.text = "$activeMark$incog${tab.title}"
             holder.b.tvTabUrl.text = if (tab.currentUrl == BrowserTabManager.HOME_URL) {
-                "صفحه شروع امن GreatFire"
+                "صفحه شروع FreeBrowser"
             } else {
                 tab.currentUrl
             }

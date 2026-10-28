@@ -15,15 +15,18 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 )
 
 // GatewayServer accepts BOTH HTTP/HTTPS CONNECT and SOCKS5 connections on a single localhost port,
-// auto-detecting the protocol from the first byte (0x05 -> SOCKS5, ASCII -> HTTP/CONNECT).
+// racing Direct Anti-DPI + Clean-IP DoH + Verified Upstream Tunnels per connection with 0ms startup wait.
 type GatewayServer struct {
 	router   *UpstreamRouter
 	doh      *DoHResolver
+	pool     *NodePool
+	racer    *ConnectionRacer
 	listener net.Listener
 
 	BytesUp           atomic.Uint64
@@ -34,10 +37,18 @@ type GatewayServer struct {
 	StartedAt         time.Time
 }
 
-func NewGatewayServer(router *UpstreamRouter, doh *DoHResolver) *GatewayServer {
+func NewGatewayServer(router *UpstreamRouter, doh *DoHResolver, pool *NodePool, racer *ConnectionRacer) *GatewayServer {
+	if pool == nil {
+		pool = NewNodePool(doh, "")
+	}
+	if racer == nil {
+		racer = NewConnectionRacer(router, pool, "")
+	}
 	return &GatewayServer{
 		router:    router,
 		doh:       doh,
+		pool:      pool,
+		racer:     racer,
 		StartedAt: time.Now(),
 	}
 }
@@ -48,7 +59,7 @@ func (g *GatewayServer) ListenAndServe(listenAddr string) error {
 		return err
 	}
 	g.listener = ln
-	log.Printf("[gfproxy] Unified HTTP/SOCKS5 gateway listening on %s", ln.Addr().String())
+	log.Printf("[gfproxy] Instant FreeBrowser/Envoy gateway listening on %s", ln.Addr().String())
 
 	for {
 		conn, err := ln.Accept()
@@ -70,6 +81,9 @@ func (g *GatewayServer) Addr() string {
 }
 
 func (g *GatewayServer) Close() error {
+	if g.pool != nil {
+		g.pool.Close()
+	}
 	if g.listener != nil {
 		return g.listener.Close()
 	}
@@ -85,7 +99,7 @@ func (g *GatewayServer) handleClient(client net.Conn) {
 	}()
 
 	_ = client.SetReadDeadline(time.Now().Add(20 * time.Second))
-	br := bufio.NewReaderSize(client, 8192)
+	br := bufio.NewReaderSize(client, 16384)
 	first, err := br.Peek(1)
 	if err != nil {
 		return
@@ -99,8 +113,57 @@ func (g *GatewayServer) handleClient(client net.Conn) {
 	}
 }
 
+// readInitialClientPayload reads the client's initial burst (such as a full TLS 1.3 ClientHello,
+// including multi-packet post-quantum ClientHellos > 1460 bytes) so ConnectionRacer can race legs safely.
+func readInitialClientPayload(client net.Conn, br *bufio.Reader) ([]byte, error) {
+	_ = client.SetReadDeadline(time.Now().Add(250 * time.Millisecond))
+	defer func() { _ = client.SetReadDeadline(time.Time{}) }()
+
+	var tmp [8192]byte
+	n, err := br.Read(tmp[:])
+	if n == 0 {
+		var netErr net.Error
+		if errors.As(err, &netErr) && netErr.Timeout() {
+			return nil, nil // Server-speaks-first protocol
+		}
+		return nil, err
+	}
+
+	buf := make([]byte, n)
+	copy(buf, tmp[:n])
+
+	// Ensure full TLS Handshake ClientHello record is read if split across TCP segments
+	if buf[0] == 0x16 && (len(buf) < 2 || buf[1] == 0x03) {
+		_ = client.SetReadDeadline(time.Now().Add(1500 * time.Millisecond))
+		for len(buf) < 5 {
+			var b [1]byte
+			if _, rErr := io.ReadFull(br, b[:]); rErr != nil {
+				return buf, nil
+			}
+			buf = append(buf, b[0])
+		}
+		recLen := int(binary.BigEndian.Uint16(buf[3:5]))
+		want := 5 + recLen
+		if recLen > 0 && recLen <= 32768 && len(buf) < want {
+			rem := make([]byte, want-len(buf))
+			if _, rErr := io.ReadFull(br, rem); rErr == nil {
+				buf = append(buf, rem...)
+			}
+		}
+	}
+
+	// Drain any immediately buffered trailing bytes in bufio.Reader
+	if extra := br.Buffered(); extra > 0 && extra <= 16384 {
+		tail := make([]byte, extra)
+		if m, _ := br.Read(tail); m > 0 {
+			buf = append(buf, tail[:m]...)
+		}
+	}
+
+	return buf, nil
+}
+
 func (g *GatewayServer) handleSOCKS5(client net.Conn, br *bufio.Reader) {
-	// Greeting: VER, NMETHODS, METHODS...
 	hdr, err := br.Peek(2)
 	if err != nil {
 		return
@@ -110,12 +173,10 @@ func (g *GatewayServer) handleSOCKS5(client net.Conn, br *bufio.Reader) {
 	if _, err := io.ReadFull(br, greeting); err != nil {
 		return
 	}
-	// Reply: no authentication required on localhost
 	if _, err := client.Write([]byte{0x05, 0x00}); err != nil {
 		return
 	}
 
-	// Request: VER, CMD, RSV, ATYP, DST.ADDR, DST.PORT
 	var reqHdr [4]byte
 	if _, err := io.ReadFull(br, reqHdr[:]); err != nil {
 		return
@@ -160,24 +221,47 @@ func (g *GatewayServer) handleSOCKS5(client net.Conn, br *bufio.Reader) {
 	}
 	port := strconv.Itoa(int(binary.BigEndian.Uint16(portBytes[:])))
 
-	ctx, cancel := context.WithTimeout(context.Background(), 35*time.Second)
-	remote, err := g.router.DialTarget(ctx, host, port)
-	cancel()
-	if err != nil {
-		if errors.Is(err, ErrKillSwitchBlocked) {
-			g.BlockedRequests.Add(1)
-			_, _ = client.Write([]byte{0x05, 0x02, 0x00, 0x01, 0, 0, 0, 0, 0, 0})
-		} else {
-			_, _ = client.Write([]byte{0x05, 0x04, 0x00, 0x01, 0, 0, 0, 0, 0, 0})
-		}
+	cfg := g.router.GetConfig()
+	if cfg.Mode == ModeBlocked {
+		g.BlockedRequests.Add(1)
+		_, _ = client.Write([]byte{0x05, 0x02, 0x00, 0x01, 0, 0, 0, 0, 0, 0})
 		return
 	}
-	defer remote.Close()
+	if cfg.Mode == ModeSOCKS5 || cfg.Mode == ModeHTTPProxy || cfg.Mode == ModeDirect {
+		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+		remote, dialErr := g.router.DialTarget(ctx, host, port)
+		cancel()
+		if dialErr != nil {
+			_, _ = client.Write([]byte{0x05, 0x04, 0x00, 0x01, 0, 0, 0, 0, 0, 0})
+			return
+		}
+		defer remote.Close()
+		if _, err := client.Write([]byte{0x05, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0}); err != nil {
+			return
+		}
+		g.pipeBidirectional(client, br, remote)
+		return
+	}
 
+	// Instant acknowledge + parallel ClientHello/ServerHello racing
 	if _, err := client.Write([]byte{0x05, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0}); err != nil {
 		return
 	}
+	initialPayload, err := readInitialClientPayload(client, br)
+	if err != nil {
+		return
+	}
+	if len(initialPayload) > 0 {
+		g.BytesUp.Add(uint64(len(initialPayload)))
+	}
 
+	ctx, cancel := context.WithTimeout(context.Background(), 18*time.Second)
+	remote, dialErr := g.racer.ConnectAndVerify(ctx, host, port, initialPayload)
+	cancel()
+	if dialErr != nil {
+		return
+	}
+	defer remote.Close()
 	g.pipeBidirectional(client, br, remote)
 }
 
@@ -194,28 +278,57 @@ func (g *GatewayServer) handleHTTP(client net.Conn, br *bufio.Reader) {
 			port = "443"
 		}
 
-		ctx, cancel := context.WithTimeout(context.Background(), 35*time.Second)
-		remote, dialErr := g.router.DialTarget(ctx, host, port)
-		cancel()
-		if dialErr != nil {
-			if errors.Is(dialErr, ErrKillSwitchBlocked) {
-				g.BlockedRequests.Add(1)
-				_, _ = io.WriteString(client, "HTTP/1.1 503 VPN Kill-Switch Active\r\nContent-Length: 0\r\n\r\n")
-			} else {
-				_, _ = io.WriteString(client, "HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\n\r\n")
-			}
+		cfg := g.router.GetConfig()
+		if cfg.Mode == ModeBlocked {
+			g.BlockedRequests.Add(1)
+			_, _ = io.WriteString(client, "HTTP/1.1 503 Blocked\r\nContent-Length: 0\r\n\r\n")
 			return
 		}
-		defer remote.Close()
+		if cfg.Mode == ModeSOCKS5 || cfg.Mode == ModeHTTPProxy || cfg.Mode == ModeDirect {
+			ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+			remote, dialErr := g.router.DialTarget(ctx, host, port)
+			cancel()
+			if dialErr != nil {
+				_, _ = io.WriteString(client, "HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\n\r\n")
+				return
+			}
+			defer remote.Close()
+			if _, err := io.WriteString(client, "HTTP/1.1 200 Connection Established\r\n\r\n"); err != nil {
+				return
+			}
+			g.pipeBidirectional(client, br, remote)
+			return
+		}
 
+		// Instant 0ms HTTP CONNECT acknowledgement -> capture TLS ClientHello -> parallel race!
 		if _, err := io.WriteString(client, "HTTP/1.1 200 Connection Established\r\n\r\n"); err != nil {
 			return
 		}
+		initialPayload, readErr := readInitialClientPayload(client, br)
+		if readErr != nil {
+			return
+		}
+		if len(initialPayload) > 0 {
+			g.BytesUp.Add(uint64(len(initialPayload)))
+		}
+
+		ctx, cancel := context.WithTimeout(context.Background(), 18*time.Second)
+		remote, dialErr := g.racer.ConnectAndVerify(ctx, host, port, initialPayload)
+		cancel()
+		if dialErr != nil {
+			return
+		}
+		defer remote.Close()
 		g.pipeBidirectional(client, br, remote)
 		return
 	}
 
 	// Plain HTTP proxy request (e.g., GET http://example.com/path HTTP/1.1)
+	if g.router.GetConfig().Mode == ModeBlocked {
+		g.BlockedRequests.Add(1)
+		_, _ = io.WriteString(client, "HTTP/1.1 503 Blocked\r\nContent-Length: 0\r\n\r\n")
+		return
+	}
 	if req.URL.Scheme == "" {
 		req.URL.Scheme = "http"
 	}
@@ -223,18 +336,13 @@ func (g *GatewayServer) handleHTTP(client net.Conn, br *bufio.Reader) {
 		req.URL.Host = req.Host
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 25*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 16*time.Second)
 	defer cancel()
 
-	resp, err := g.router.ForwardPlainHTTP(ctx, req)
+	resp, err := g.forwardSmartHTTP(ctx, req)
 	if err != nil {
-		if errors.Is(err, ErrKillSwitchBlocked) {
-			g.BlockedRequests.Add(1)
-			_, _ = io.WriteString(client, "HTTP/1.1 503 VPN Kill-Switch Active\r\nContent-Type: text/plain\r\n\r\nBlocked by Kill-Switch")
-		} else {
-			msg := fmt.Sprintf("GreatFire Proxy Error: %v", err)
-			_, _ = fmt.Fprintf(client, "HTTP/1.1 502 Bad Gateway\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: %d\r\n\r\n%s", len(msg), msg)
-		}
+		msg := fmt.Sprintf("Proxy Error: %v", err)
+		_, _ = fmt.Fprintf(client, "HTTP/1.1 502 Bad Gateway\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: %d\r\n\r\n%s", len(msg), msg)
 		return
 	}
 	defer resp.Body.Close()
@@ -244,39 +352,82 @@ func (g *GatewayServer) handleHTTP(client net.Conn, br *bufio.Reader) {
 	_ = resp.Write(client)
 }
 
+func (g *GatewayServer) forwardSmartHTTP(ctx context.Context, req *http.Request) (*http.Response, error) {
+	host := req.URL.Hostname()
+	if !isKnownFilteredHost(host) {
+		resp, err := g.router.ForwardPlainHTTP(ctx, req)
+		if err == nil && resp.StatusCode != 451 && resp.StatusCode != 403 {
+			return resp, nil
+		}
+		if resp != nil {
+			_ = resp.Body.Close()
+		}
+	}
+
+	// Fallback / filtered host: route plain HTTP through fastest verified tunnel node
+	nodes := g.pool.PickNodes(ctx, 1, 1500*time.Millisecond)
+	if len(nodes) > 0 {
+		tr := &http.Transport{
+			DialContext: func(dialCtx context.Context, _, addr string) (net.Conn, error) {
+				h, p, sErr := net.SplitHostPort(addr)
+				if sErr != nil {
+					h = addr
+					p = "80"
+				}
+				return DialOutboundNode(dialCtx, g.doh, nodes[0], h, p)
+			},
+			ResponseHeaderTimeout: 10 * time.Second,
+		}
+		defer tr.CloseIdleConnections()
+		outReq := req.Clone(ctx)
+		outReq.RequestURI = ""
+		removeHopByHopHeaders(outReq.Header)
+		if resp, err := tr.RoundTrip(outReq); err == nil {
+			return resp, nil
+		}
+	}
+
+	return g.router.ForwardPlainHTTP(ctx, req)
+}
+
 func (g *GatewayServer) pipeBidirectional(client net.Conn, clientReader io.Reader, remote net.Conn) {
-	done := make(chan struct{}, 2)
+	var wg sync.WaitGroup
+	wg.Add(2)
 
 	// Client -> Remote (Upload)
 	go func() {
+		defer wg.Done()
 		n, _ := io.Copy(remote, clientReader)
 		if n > 0 {
 			g.BytesUp.Add(uint64(n))
 		}
-		if tc, ok := remote.(*net.TCPConn); ok {
-			_ = tc.CloseWrite()
-		} else if fc, ok := remote.(*FragmentingConn); ok {
-			if inner, ok2 := fc.Conn.(*net.TCPConn); ok2 {
-				_ = inner.CloseWrite()
-			}
-		}
-		done <- struct{}{}
+		closeHalfWrite(remote)
 	}()
 
 	// Remote -> Client (Download)
 	go func() {
+		defer wg.Done()
 		n, _ := io.Copy(client, remote)
 		if n > 0 {
 			g.BytesDown.Add(uint64(n))
 		}
-		if tc, ok := client.(*net.TCPConn); ok {
-			_ = tc.CloseWrite()
-		}
-		done <- struct{}{}
+		closeHalfWrite(client)
 	}()
 
-	<-done
-	<-done
+	wg.Wait()
+}
+
+func closeHalfWrite(c net.Conn) {
+	switch v := c.(type) {
+	case *net.TCPConn:
+		_ = v.CloseWrite()
+	case *FragmentingConn:
+		closeHalfWrite(v.Conn)
+	case *prefixedConn:
+		closeHalfWrite(v.Conn)
+	default:
+		_ = c.SetReadDeadline(time.Now().Add(250 * time.Millisecond))
+	}
 }
 
 type countingReader struct {
@@ -292,7 +443,6 @@ func (cr *countingReader) Read(p []byte) (int, error) {
 	return n, err
 }
 
-// StatusResponse is returned by the authenticated localhost control API for live UI telemetry.
 type StatusResponse struct {
 	OK                bool          `json:"ok"`
 	GatewayAddr       string        `json:"gateway_addr"`
@@ -304,6 +454,12 @@ type StatusResponse struct {
 	BlockedRequests   uint64        `json:"blocked_requests"`
 	DoHQueries        uint64        `json:"doh_queries"`
 	DoHCacheHits      uint64        `json:"doh_cache_hits"`
+	ReadyNodes        int           `json:"ready_nodes"`
+	BestNode          string        `json:"best_node,omitempty"`
+	BestProto         string        `json:"best_proto,omitempty"`
+	BestRTTMs         int64         `json:"best_rtt_ms,omitempty"`
+	DirectWins        uint64        `json:"direct_wins"`
+	TunnelWins        uint64        `json:"tunnel_wins"`
 	Config            RuntimeConfig `json:"config"`
 }
 
@@ -312,6 +468,7 @@ type ProbeResponse struct {
 	Status    int    `json:"status"`
 	LatencyMs int64  `json:"latency_ms"`
 	Mode      string `json:"mode"`
+	BestNode  string `json:"best_node,omitempty"`
 	Error     string `json:"error,omitempty"`
 }
 
@@ -330,6 +487,9 @@ func NewControlMux(gw *GatewayServer, router *UpstreamRouter, doh *DoHResolver, 
 		if !authorized(w, r) {
 			return
 		}
+		bestName, bestProto, bestRTT, readyCnt := gw.pool.BestNodeSummary()
+		cfg := router.GetConfig()
+		cfg.CustomURI = gw.pool.GetCustomURI()
 		resp := StatusResponse{
 			OK:                true,
 			GatewayAddr:       gw.Addr(),
@@ -341,7 +501,13 @@ func NewControlMux(gw *GatewayServer, router *UpstreamRouter, doh *DoHResolver, 
 			BlockedRequests:   gw.BlockedRequests.Load(),
 			DoHQueries:        doh.Queries.Load(),
 			DoHCacheHits:      doh.CacheHits.Load(),
-			Config:            router.GetConfig(),
+			ReadyNodes:        readyCnt,
+			BestNode:          bestName,
+			BestProto:         bestProto,
+			BestRTTMs:         bestRTT,
+			DirectWins:        gw.racer.DirectWins.Load(),
+			TunnelWins:        gw.racer.TunnelWins.Load(),
+			Config:            cfg,
 		}
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(resp)
@@ -360,9 +526,22 @@ func NewControlMux(gw *GatewayServer, router *UpstreamRouter, doh *DoHResolver, 
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
+		if err := gw.pool.SetCustomURI(next.CustomURI); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
 		router.UpdateConfig(next)
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]any{"ok": true, "config": router.GetConfig()})
+	})
+
+	mux.HandleFunc("/refresh", func(w http.ResponseWriter, r *http.Request) {
+		if !authorized(w, r) {
+			return
+		}
+		gw.pool.RefreshFromFeedsAsync()
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{"ok": true})
 	})
 
 	mux.HandleFunc("/probe", func(w http.ResponseWriter, r *http.Request) {
@@ -371,12 +550,11 @@ func NewControlMux(gw *GatewayServer, router *UpstreamRouter, doh *DoHResolver, 
 		}
 		target := r.URL.Query().Get("url")
 		if target == "" {
-			// Probe a genuinely censored target (YouTube 204 endpoint), NEVER uncensored google.com!
 			target = "https://www.youtube.com/generate_204"
 		}
 		timeoutMs, _ := strconv.Atoi(r.URL.Query().Get("timeout_ms"))
-		if timeoutMs < 2000 || timeoutMs > 30000 {
-			timeoutMs = 12000
+		if timeoutMs < 2000 || timeoutMs > 20000 {
+			timeoutMs = 8000
 		}
 
 		u, err := url.Parse(target)
@@ -391,60 +569,31 @@ func NewControlMux(gw *GatewayServer, router *UpstreamRouter, doh *DoHResolver, 
 		ctx, cancel := context.WithTimeout(r.Context(), timeoutDur)
 		defer cancel()
 
-		cfg := router.GetConfig()
+		proxyURL, _ := url.Parse("http://" + gw.Addr())
 		tr := &http.Transport{
-			ForceAttemptHTTP2: true,
-			DialContext: func(dialCtx context.Context, _, addr string) (net.Conn, error) {
-				h, p, splitErr := net.SplitHostPort(addr)
-				if splitErr != nil {
-					h = u.Hostname()
-					p = "80"
-				}
-				return router.DialTarget(dialCtx, h, p)
-			},
-			DialTLSContext: func(dialCtx context.Context, _, addr string) (net.Conn, error) {
-				h, p, splitErr := net.SplitHostPort(addr)
-				if splitErr != nil {
-					h = u.Hostname()
-					p = "443"
-				}
-				raw, dialErr := router.DialTarget(dialCtx, h, p)
-				if dialErr != nil {
-					return nil, dialErr
-				}
-				tlsConn := tls.Client(raw, &tls.Config{
-					ServerName: h,
-					RootCAs:    AndroidRootCertPool(),
-					NextProtos: []string{"h2", "http/1.1"},
-					MinVersion: tls.VersionTLS12,
-				})
-				if hsErr := tlsConn.HandshakeContext(dialCtx); hsErr != nil {
-					_ = raw.Close()
-					return nil, hsErr
-				}
-				return tlsConn, nil
+			Proxy: http.ProxyURL(proxyURL),
+			TLSClientConfig: &tls.Config{
+				RootCAs:    AndroidRootCertPool(),
+				MinVersion: tls.VersionTLS12,
 			},
 		}
 		defer tr.CloseIdleConnections()
 
 		client := &http.Client{Transport: tr, Timeout: timeoutDur}
 		req, _ := http.NewRequestWithContext(ctx, http.MethodGet, target, nil)
-		req.Header.Set("User-Agent", "Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 Chrome/128.0.0.0 Mobile Safari/537.36")
+		req.Header.Set("User-Agent", "Mozilla/5.0 Chrome/130.0.0.0 Mobile Safari/537.36")
 
-		var resp *http.Response
-		if cfg.Mode == ModeEnvoyHTTP && cfg.EnvoyURL != "" {
-			resp, err = router.ForwardPlainHTTP(ctx, req)
-		} else {
-			resp, err = client.Do(req)
-		}
-
+		resp, err := client.Do(req)
 		elapsed := time.Since(start).Milliseconds()
+		bestName, _, _, _ := gw.pool.BestNodeSummary()
+
 		w.Header().Set("Content-Type", "application/json")
 		if err != nil {
 			_ = json.NewEncoder(w).Encode(ProbeResponse{
 				OK:        false,
 				LatencyMs: elapsed,
-				Mode:      string(cfg.Mode),
+				Mode:      string(router.GetConfig().Mode),
+				BestNode:  bestName,
 				Error:     err.Error(),
 			})
 			return
@@ -454,7 +603,8 @@ func NewControlMux(gw *GatewayServer, router *UpstreamRouter, doh *DoHResolver, 
 			OK:        resp.StatusCode >= 200 && resp.StatusCode < 400,
 			Status:    resp.StatusCode,
 			LatencyMs: elapsed,
-			Mode:      string(cfg.Mode),
+			Mode:      string(router.GetConfig().Mode),
+			BestNode:  bestName,
 		})
 	})
 

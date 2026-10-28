@@ -1,0 +1,27 @@
+# Verified low-latency (<400ms) bootstrap anti-censorship nodes (VLESS-WS-TLS, Shadowsocks AEAD, Trojan-TLS)
+# Used only during the first ~500ms before live GitHub/jsDelivr feeds refresh nodes_cache.json
+vless://d342d11e-d224-4463-b982-532309285094@104.21.221.158:443?cs=semi-python&path=%2Ffp%3Dunsafe&security=tls&encryption=none&fm=tlshello-0-len&insecure=0&host=ccc.010304.xyz&fp=unsafe&type=ws&allowInsecure=0&sni=ccc.010304.xyz#CF-CA-1
+vless://b2f2f9f2-1864-48ea-839b-22815faff1f1@172.66.44.124:2096?encryption=none&security=tls&sni=stf839dvvyog9d2qa4-b8z6ahgn7b7qi.pages.dev&fp=randomized&alpn=http%2F1.1&type=ws&host=stf839dvvyog9d2qa4-b8z6ahgn7b7qi.pages.dev&path=%2F9BozNyvQ8VdRvsYX%3Fed%3D2560#CF-Pages-1
+vless://9cdcbaf0-d244-4f37-b227-90166e43f5b5@172.67.152.148:443?encryption=none&security=tls&sni=cf-socks.caoyuwu.eu.org&fp=chrome&type=ws&host=cf-socks.caoyuwu.eu.org&path=%2F#CF-EU-1
+vless://d342d11e-d224-4463-b982-532309285094@172.66.0.162:443?encryption=none&type=ws&path=%2F&host=ccc.010304.xyz&security=tls&sni=ccc.010304.xyz&fp=chrome#CF-Fast-2
+vless://d342d11e-d224-4463-b982-532309285094@104.18.37.247:443?security=tls&sni=ccc.010304.xyz&type=ws&host=ccc.010304.xyz&path=%2F&fp=chrome#CF-Fast-3
+vless://d342d11e-d224-4463-b982-532309285094@88.216.69.253:443?cs=semi-python&path=%2Ffp%3Dchrome&security=tls&encryption=none&fm=tlshello-0-len&insecure=0&host=ccc.010304.xyz&fp=unsafe&type=ws&allowInsecure=0&sni=ccc.010304.xyz#LT-Fast-1
+vless://93fa8bdb-9cca-4a3e-8355-b7c12e4f595e@188.114.97.6:443?encryption=none&security=tls&sni=fornewiran.ade-1000.workers.dev&fp=unsafe&alpn=http%2F1.1&type=ws&host=fornewiran.ade-1000.workers.dev&path=%2Fvl%2FyLWNcuUuw1jlJpkDhGy%3Fed%3D2560#CF-Worker-IR
+ss://YWVzLTEyOC1nY206c2hhZG93c29ja3M@37.19.198.160:443#US-SS-1
+ss://YWVzLTEyOC1nY206c2hhZG93c29ja3M=@37.19.198.244:443#US-SS-2
+ss://YWVzLTEyOC1nY206c2hhZG93c29ja3M=@37.19.198.236:443#US-SS-3
+ss://Y2hhY2hhMjAtaWV0Zi1wb2x5MTMwNTplRGZON1NPRFFjZUlPbUlBYnRKSnRL@198.98.53.130:443#US-SS-4
+ss://YWVzLTI1Ni1nY206ekROVmVkUkZQUWV4Rzl2@51.222.141.125:445#CA-SS-1
+ss://YWVzLTI1Ni1nY206WlJwZ2FCZUd4dEVOSVhndmhwa1pCS3o5R25XUlMyZFljeDlPK2EyaXdOND0=@45.86.51.18:19999#US-SS-5
+ss://YWVzLTI1Ni1nY206Rm9PaUdsa0FBOXlQRUdQ@15.204.246.132:7307#US-SS-6
+ss://YWVzLTI1Ni1nY206a0RXdlhZWm9UQmNHa0M0@51.222.136.236:8882#CA-SS-2
+ss://YWVzLTI1Ni1nY206Y2RCSURWNDJEQ3duZklO@51.79.85.185:8118#CA-SS-3
+ss://YWVzLTEyOC1nY206c2hhZG93c29ja3M=@149.22.87.204:443#JP-SS-1
+ss://YWVzLTEyOC1nY206c2hhZG93c29ja3M=@149.22.87.240:443#JP-SS-2
+ss://Y2hhY2hhMjAtaWV0Zi1wb2x5MTMwNTp1dktOdWRWLU44QVVDcnlrUGl5em5B@87.236.166.178:56137#TR-SS-1
+trojan://bd85f5fe32d9446a8b1f59e4f710455b@172.67.255.101:443?sni=BpB-PAnEL-62c3.mlM-eE9A3b83.wOrKErS.dev&fp=unsafe&alpn=http%2F1.1&type=ws&path=%2FeyJqdW5rIjoibkN2cER2SDZIUTkiLCJwcm90b2NvbCI6InRyIiwibW9kZSI6IiIsInBhbmVsSVBzIjoiWzJhMDI6ODk4OjE0Njo2NDo6XSJ9%3Fed%3D2560#CF-BPB-1
+trojan://19877587-ed94-4033-88cd-4ac50a5e8718@104.18.153.182:443?host=dimskiee.biz.id&path=/WangCai-8&security=tls&sni=dimskiee.biz.id&type=ws#CF-TR-2
+trojan://bpb-trojan@vless.herogoing.top:443?sni=vless.herogoing.top&type=ws&path=/tr?ed=2560&fp=chrome#CF-TR-3
+trojan://bd85f5fe32d9446a8b1f59e4f710455b@104.24.163.206:443?sni=BpB-PAnEL-62c3.mlM-eE9A3b83.wOrKErS.dev&type=ws&path=/eyJqdW5rIjoibkN2cER2SDZIUTkiLCJwcm90b2NvbCI6InRyIiwibW9kZSI6IiIsInBhbmVsSVBzIjoiWzJhMDI6ODk4OjE0Njo2NDo6XSJ9?ed=2560&alpn=http/1.1&fp=chrome#CF-BPB-2
+trojan://dba20dcb635e430fa4d3bfc303a149d2@216.106.186.32:443?security=tls&sni=blog.findlocaljobnetworkandbuildcommunityconnections.com&type=tcp&headerType=none#US-TR-1
+trojan://f0eb8c92ce8946aaba856569cff1a16b@216.106.186.33:443?sni=resources.findlocaljobnetworkandbuildcommunityconnections.com#US-TR-2

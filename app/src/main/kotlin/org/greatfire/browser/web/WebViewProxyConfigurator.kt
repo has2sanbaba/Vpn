@@ -39,13 +39,11 @@ object WebViewProxyConfigurator {
         val host = "127.0.0.1"
         val proxyUrl = "http://$host:$localHttpProxyPort"
 
-        // Always set JVM proxy properties as an additional safety net
+        // Always set JVM HTTP/HTTPS proxy properties as an additional safety net
         System.setProperty("http.proxyHost", host)
         System.setProperty("http.proxyPort", localHttpProxyPort.toString())
         System.setProperty("https.proxyHost", host)
         System.setProperty("https.proxyPort", localHttpProxyPort.toString())
-        System.setProperty("socksProxyHost", host)
-        System.setProperty("socksProxyPort", localHttpProxyPort.toString())
 
         if (lastAppliedPort == localHttpProxyPort) {
             return true
@@ -57,7 +55,6 @@ object WebViewProxyConfigurator {
                 try {
                     val configBuilder = ProxyConfig.Builder()
                         .addProxyRule(proxyUrl)
-                        .addProxyRule("socks5://$host:$localHttpProxyPort")
 
                     if (WebViewFeature.isFeatureSupported(WebViewFeature.PROXY_OVERRIDE_REVERSE_BYPASS)) {
                         configBuilder.setReverseBypassEnabled(false)

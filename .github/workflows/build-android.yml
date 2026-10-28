@@ -1,4 +1,4 @@
-name: Build GreatFire VPN Browser (All Androids & All CPUs)
+name: Build FreeBrowser v3.0 Lightweight Anti-Censorship Browser
 
 on:
   push:
@@ -23,9 +23,9 @@ permissions:
 
 jobs:
   build-android:
-    name: Build & Verify Multi-Arch Android APKs v2.0 (API 21–35+)
+    name: Build & Verify Lightweight FreeBrowser v3.0 (API 21–35+, All 4 ABIs)
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 30
 
     steps:
       - name: Checkout Repository
@@ -38,23 +38,25 @@ jobs:
           java-version: "17"
           cache: gradle
 
-      - name: Set up Go 1.26 (with auto-toolchain for Go 1.24 warp-plus)
+      - name: Set up Go 1.24
         uses: actions/setup-go@v5
         with:
-          go-version: "1.26"
+          go-version: "1.24"
           cache: false
 
-      - name: Cache Go Toolchains & Modules
+      - name: Cache Go Modules
         uses: actions/cache@v4
         with:
           path: ~/go/pkg/mod
-          key: go-mod-vpn-v2-${{ hashFiles('scripts/build-gfproxy-android.sh', 'native/gfproxy/go.mod') }}
+          key: go-mod-freebrowser-v3-${{ hashFiles('native/gfproxy/go.mod') }}
           restore-keys: |
-            go-mod-vpn-v2-
+            go-mod-freebrowser-v3-
 
-      - name: Test Native GreatFire Anti-DPI & Unified Gateway Engine (Go)
+      - name: Resolve Go Modules & Run Parallel-Racer Engine Unit Tests
         working-directory: native/gfproxy
-        run: go test -v -race ./...
+        run: |
+          GOTOOLCHAIN=auto go mod tidy
+          GOTOOLCHAIN=auto go test -v -race ./...
 
       - name: Ensure Android SDK Licenses & NDK with API 21 Toolchain
         run: |
@@ -78,24 +80,7 @@ jobs:
           echo "ANDROID_NDK_HOME=$FOUND_NDK" >> "$GITHUB_ENV"
           echo "Using ANDROID_NDK_HOME=$FOUND_NDK"
 
-      - name: Cache GreatFire Official AARs (Envoy Cronet + IEnvoyProxy)
-        uses: actions/cache@v4
-        with:
-          path: app/libs
-          key: greatfire-aars-cronet108-ienvoy350-v2
-
-      - name: Fetch GreatFire Envoy Cronet & IEnvoyProxy AARs
-        run: ./scripts/fetch-greatfire-libs.sh
-
-      - name: Cache Compiled 4-ABI Native Engines (libgfproxy, libwarpplus, libsingbox)
-        id: cache-jni
-        uses: actions/cache@v4
-        with:
-          path: app/src/main/jniLibs
-          key: jnilibs-v2-${{ hashFiles('scripts/build-gfproxy-android.sh', 'native/gfproxy/**') }}
-
-      - name: Cross-Compile libgfproxy.so, libwarpplus.so & libsingbox.so (All 4 ABIs, API 21)
-        if: steps.cache-jni.outputs.cache-hit != 'true'
+      - name: Cross-Compile Lightweight libgfproxy.so (All 4 ABIs, API 21, 16KB Page Aligned)
         run: |
           set +e
           ./scripts/build-gfproxy-android.sh > native_build.log 2>&1
@@ -116,7 +101,7 @@ jobs:
           KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
         run: ./scripts/ensure-keystore.sh
 
-      - name: Run Unit Tests & Assemble Release + Debug APKs
+      - name: Run Unit Tests & Assemble R8-Shrunk Release + Debug APKs
         run: |
           set +e
           ./gradlew testDebugUnitTest assembleRelease assembleDebug --no-daemon > gradle_build.log 2>&1
@@ -131,7 +116,7 @@ jobs:
           fi
           set -e
 
-      - name: Verify All 4 CPU Architectures, All 7 Native Engines (28 .so Binaries), and API 21 Signatures
+      - name: Verify All 4 CPU Architectures, Lightweight APK Sizes & API 21 Signatures
         run: |
           set -euo pipefail
           SDK_ROOT="${ANDROID_HOME:-/usr/local/lib/android/sdk}"
@@ -141,24 +126,22 @@ jobs:
           REL_DIR="app/build/outputs/apk/release"
           mkdir -p dist
 
-          cp "$REL_DIR/app-universal-release.apk"   "dist/GreatFire-VPN-Browser-v2.0.0-universal-release.apk"
-          cp "$REL_DIR/app-arm64-v8a-release.apk"   "dist/GreatFire-VPN-Browser-v2.0.0-arm64-v8a-release.apk"
-          cp "$REL_DIR/app-armeabi-v7a-release.apk" "dist/GreatFire-VPN-Browser-v2.0.0-armeabi-v7a-release.apk"
-          cp "$REL_DIR/app-x86_64-release.apk"      "dist/GreatFire-VPN-Browser-v2.0.0-x86_64-release.apk"
-          cp "$REL_DIR/app-x86-release.apk"         "dist/GreatFire-VPN-Browser-v2.0.0-x86-release.apk"
+          cp "$REL_DIR/app-universal-release.apk"   "dist/FreeBrowser-v3.0.0-universal-release.apk"
+          cp "$REL_DIR/app-arm64-v8a-release.apk"   "dist/FreeBrowser-v3.0.0-arm64-v8a-release.apk"
+          cp "$REL_DIR/app-armeabi-v7a-release.apk" "dist/FreeBrowser-v3.0.0-armeabi-v7a-release.apk"
+          cp "$REL_DIR/app-x86_64-release.apk"      "dist/FreeBrowser-v3.0.0-x86_64-release.apk"
+          cp "$REL_DIR/app-x86-release.apk"         "dist/FreeBrowser-v3.0.0-x86-release.apk"
 
-          UNIV="dist/GreatFire-VPN-Browser-v2.0.0-universal-release.apk"
+          UNIV="dist/FreeBrowser-v3.0.0-universal-release.apk"
           unzip -l "$UNIV" > zip_list.txt
 
           for abi in armeabi-v7a arm64-v8a x86 x86_64; do
-            for lib in libcronet.108.0.5359.195.so libgojni.so libsslocal.so libtor.so libgfproxy.so libwarpplus.so libsingbox.so; do
-              grep -Fq "lib/$abi/$lib" zip_list.txt || {
-                echo "::error title=MissingNativeLib::MISSING native library lib/$abi/$lib in Universal APK"
-                exit 1
-              }
-            done
+            grep -Fq "lib/$abi/libgfproxy.so" zip_list.txt || {
+              echo "::error title=MissingNativeLib::MISSING native library lib/$abi/libgfproxy.so in Universal APK"
+              exit 1
+            }
           done
-          echo "Verified all 28 native .so libraries (7 engines x 4 CPU ABIs) inside Universal APK!"
+          echo "Verified lightweight libgfproxy.so across all 4 CPU ABIs inside Universal APK!"
 
           for apk in dist/*.apk; do
             "$APKSIGNER" verify --verbose --min-sdk-version 21 "$apk" > apksigner_out.txt 2>&1 || {
@@ -181,20 +164,15 @@ jobs:
           echo "::notice title=BuiltAPKs::${NOTICE_BODY}"
 
           {
-            echo "## 🛡️ GreatFire VPN Browser v2.0 — Build Verification Summary"
+            echo "## ⚡ FreeBrowser v3.0 — Instant Zero-Wait Chrome-Style Anti-Censorship Browser"
             echo ""
+            echo "- **Architecture:** Modeled directly on GreatFire **AppMaker** + **FreeBrowser** (\`pkg/proxy.go\` + \`pkg/request.go\` parallel transport racer + \`method_data.json\` eTLD+1 domain memory)"
+            echo "- **Zero Connection Wait (\`0ms\` UI):** Opens immediately to a clean Chrome-like browser; filtered websites bypass censorship transparently per-request in parallel"
             echo "- **Supported Android Versions:** Android 5.0 Lollipop (\`API 21\`) → Android 16 (\`API 35+\`, 16 KB page-aligned)"
             echo "- **Supported CPU Architectures:** \`arm64-v8a\`, \`armeabi-v7a\`, \`x86_64\`, \`x86\` + \`universal\`"
-            echo "- **7 Bundled Native Anti-Censorship Engines:**"
-            echo "  1. \`libwarpplus.so\` — Zero-Config Clean-IP Cloudflare WARP+, WARP-in-WARP (\`Gool\`), & Psiphon-over-WARP (\`CFON\`)"
-            echo "  2. \`libgojni.so\` + \`libtor.so\` — GreatFire \`IEnvoyProxy\` Pluggable Transports (\`MeekLite\` CDN77, \`Snowflake\` CDN77/DataPacket, \`Obfs4\`) chained behind Guardian Project \`TorService\`"
-            echo "  3. \`libsingbox.so\` — \`sing-box v1.14.4\` (\`VLESS-Reality\`, \`WS\`, \`gRPC\`, \`Trojan\`, \`TUIC v5\`, \`Hysteria2\`, \`VMess\`, \`Shadowsocks-2022\`, \`WireGuard\` + TLS Record Fragmentation)"
-            echo "  4. \`libcronet.108.0.5359.195.so\` — GreatFire Patched Chromium Cronet + Envoy + Geneva Evasion"
-            echo "  5. \`libsslocal.so\` — GreatFire / GFW-Report Shadowsocks-Rust"
-            echo "  6. \`libgfproxy.so\` — Unified Local HTTP/SOCKS5 Gateway + Multi-Provider Fragmented DoH + Strict Zero-Leak Kill-Switch"
-            echo "- **APK Signatures:** V1 (JAR) + V2 + V3 verified for \`minSdkVersion=21\`"
+            echo "- **Single Lightweight Native Engine (\`libgfproxy.so\`):** Fragmented DoH + Chrome \`uTLS\` + TLS ClientHello Desync + Parallel VLESS (\`Reality\` / \`WS\` / \`TCP\`) + Trojan + Shadowsocks AEAD + HTTP/SOCKS5 Racer"
             echo ""
-            echo "### 📦 Ready-to-Install Release APKs"
+            echo "### 📦 Ready-to-Install Lightweight Release APKs"
             echo "| File | Size | SHA-256 |"
             echo "|---|---|---|"
             for f in dist/*.apk; do
@@ -208,7 +186,7 @@ jobs:
       - name: Upload Signed Release APKs Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: GreatFire-VPN-Browser-v2-APKs
+          name: FreeBrowser-v3-APKs
           path: dist/*
           if-no-files-found: error
           retention-days: 90
@@ -216,7 +194,7 @@ jobs:
       - name: Upload Debug Universal APK Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: GreatFire-VPN-Browser-v2-Debug-APK
+          name: FreeBrowser-v3-Debug-APK
           path: app/build/outputs/apk/debug/app-universal-debug.apk
           if-no-files-found: warn
           retention-days: 30
@@ -225,13 +203,13 @@ jobs:
         if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v') || github.event.inputs.publish_release == 'true'
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || format('v2.0.0-build.{0}', github.run_number) }}
-          name: "GreatFire VPN Browser v2.0 (${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || format('Build #{0}', github.run_number) }})"
+          tag_name: ${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || format('v3.0.0-build.{0}', github.run_number) }}
+          name: "FreeBrowser v3.0 Lightweight (${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || format('Build #{0}', github.run_number) }})"
           generate_release_notes: true
           files: |
-            dist/GreatFire-VPN-Browser-v2.0.0-universal-release.apk
-            dist/GreatFire-VPN-Browser-v2.0.0-arm64-v8a-release.apk
-            dist/GreatFire-VPN-Browser-v2.0.0-armeabi-v7a-release.apk
-            dist/GreatFire-VPN-Browser-v2.0.0-x86_64-release.apk
-            dist/GreatFire-VPN-Browser-v2.0.0-x86-release.apk
+            dist/FreeBrowser-v3.0.0-universal-release.apk
+            dist/FreeBrowser-v3.0.0-arm64-v8a-release.apk
+            dist/FreeBrowser-v3.0.0-armeabi-v7a-release.apk
+            dist/FreeBrowser-v3.0.0-x86_64-release.apk
+            dist/FreeBrowser-v3.0.0-x86-release.apk
             dist/SHA256SUMS.txt
