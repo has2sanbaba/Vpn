@@ -17,6 +17,7 @@ import kotlinx.coroutines.withContext
 import org.greatfire.browser.vpn.ProxyProfile
 import org.greatfire.browser.vpn.TransportKind
 import org.torproject.jni.TorService
+import java.util.concurrent.atomic.AtomicReference
 
 /**
  * Zero-Config Anti-Censorship Engine #2:
@@ -105,14 +106,13 @@ class TorBridgeRunner(
 
         onStatusLine?.invoke("درحال ساخت مدار رمزنگاری‌شده Tor از مسیر $ptName…")
 
-        @Volatile
-        var latestStatus = ""
+        val latestStatus = AtomicReference("")
 
         val statusReceiver = object : BroadcastReceiver() {
             override fun onReceive(context: Context?, intent: Intent?) {
                 if (intent?.action == TorService.ACTION_STATUS) {
                     val st = intent.getStringExtra(TorService.EXTRA_STATUS).orEmpty()
-                    latestStatus = st
+                    latestStatus.set(st)
                     Log.i(TAG, "TorService broadcast status=$st socksPort=${TorService.socksPort}")
                 }
             }
@@ -155,8 +155,8 @@ class TorBridgeRunner(
 
             while (System.currentTimeMillis() < deadline) {
                 val port = TorService.socksPort
-                if (port > 0 && (latestStatus == TorService.STATUS_ON || ShadowsocksRunner.waitForTcpPort("127.0.0.1", port, 250L))) {
-                    if (latestStatus == TorService.STATUS_ON) {
+                if (port > 0 && (latestStatus.get() == TorService.STATUS_ON || ShadowsocksRunner.waitForTcpPort("127.0.0.1", port, 250L))) {
+                    if (latestStatus.get() == TorService.STATUS_ON) {
                         Log.i(TAG, "Tor + GreatFire $ptName circuit READY on 127.0.0.1:$port")
                         return "127.0.0.1:$port"
                     }

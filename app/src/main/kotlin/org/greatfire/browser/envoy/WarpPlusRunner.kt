@@ -6,6 +6,7 @@ import org.greatfire.browser.vpn.LegacySslTrustBridge
 import java.io.File
 import java.net.InetSocketAddress
 import java.net.Socket
+import java.util.concurrent.atomic.AtomicBoolean
 
 /**
  * Zero-Config Anti-Censorship Engine #1:
@@ -85,8 +86,7 @@ class WarpPlusRunner(private val context: Context) {
         process = started
         activePort = port
 
-        @Volatile
-        var boundSignal = false
+        val boundSignal = AtomicBoolean(false)
 
         Thread({
             runCatching {
@@ -103,7 +103,7 @@ class WarpPlusRunner(private val context: Context) {
                                 onStatusLine?.invoke("درحال برقراری تونل Psiphon از مسیر WARP…")
                             line.contains("serving proxy", ignoreCase = true) ||
                                 line.contains("127.0.0.1:$port") ->
-                                boundSignal = true
+                                boundSignal.set(true)
                         }
                     }
                 }
@@ -119,7 +119,7 @@ class WarpPlusRunner(private val context: Context) {
                 stop()
                 throw IllegalStateException("موتور WARP+ متوقف شد (کد خروج ${runCatching { started.exitValue() }.getOrDefault(-1)})")
             }
-            if (boundSignal || canConnectLocalPort(port)) {
+            if (boundSignal.get() || canConnectLocalPort(port)) {
                 ready = true
                 break
             }
