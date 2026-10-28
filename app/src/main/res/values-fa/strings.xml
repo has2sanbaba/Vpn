@@ -1,0 +1,26 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">مرورگر ضد فیلتر GreatFire</string>
+    <string name="omnibox_hint">جستجو یا آدرس سایت (عبور خودکار از VPN)…</string>
+    <string name="vpn_connected">متصل</string>
+    <string name="vpn_connecting">درحال اتصال…</string>
+    <string name="vpn_disconnected">قطع (محافظ فعال)</string>
+    <string name="vpn_direct">مستقیم</string>
+    <string name="vpn_hub_title">سپر ضد فیلتر و VPN داخلی GreatFire</string>
+    <string name="vpn_hub_subtitle">مجهز به موتور Envoy + Cronet + IEnvoyProxy + FreeBrowser</string>
+    <string name="btn_connect">اتصال</string>
+    <string name="btn_disconnect">قطع اتصال</string>
+    <string name="btn_test_all">تست پینگ</string>
+    <string name="btn_import_clipboard">افزودن از کلیپ‌بورد</string>
+    <string name="btn_add_custom">افزودن سرور / لینک اشتراک</string>
+    <string name="kill_switch_label">قفل Kill-Switch (مسدودسازی نشت ترافیک بدون VPN)</string>
+    <string name="adblock_label">حذف تبلیغات و ردیاب‌ها</string>
+    <string name="webrtc_shield_label">جلوگیری از نشت آی‌پی WebRTC</string>
+    <string name="tabs_title">مدیریت تب‌ها</string>
+    <string name="new_tab">تب جدید</string>
+    <string name="new_incognito_tab">تب ناشناس</string>
+    <string name="panic_wipe_done">پاک‌سازی اضطراری انجام شد (کوکی، کش و تاریخچه حذف شدند)</string>
+    <string name="notif_channel_name">تونل ضد فیلتر GreatFire</string>
+    <string name="notif_running_title">تونل ضد فیلتر GreatFire متصل است</string>
+    <string name="notif_disconnect">قطع اتصال</string>
+</resources>

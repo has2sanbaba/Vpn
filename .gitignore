@@ -1,0 +1,29 @@
+# Gradle & Android Studio
+.gradle/
+build/
+app/build/
+local.properties
+.idea/
+*.iml
+captures/
+.externalNativeBuild/
+.cxx/
+
+# Downloaded / compiled native artifacts (fetched & built automatically in CI / preBuild)
+app/libs/*.aar
+app/libs/*.tmp
+app/src/main/jniLibs/
+
+# Keystores
+keystore/
+*.jks
+*.keystore
+
+# Go temporary build outputs
+native/gfproxy/gfproxy
+native/gfproxy/*.so
+native/gfproxy/*.exe
+
+# OS files
+.DS_Store
+Thumbs.db
