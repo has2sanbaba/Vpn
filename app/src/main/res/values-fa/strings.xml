@@ -1,10 +1,10 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <string name="app_name">FreeBrowser</string>
-    <string name="omnibox_hint">جستجو در گوگل یا تایپ آدرس وب</string>
-    <string name="home_search_hint">جستجو در گوگل یا وارد کردن آدرس سایت…</string>
-    <string name="tabs_title">تب‌های باز</string>
+    <string name="app_name">Dr Browser</string>
+    <string name="omnibox_hint">جستجو یا تایپ نشانی وب</string>
+    <string name="home_search_hint">جستجو در گوگل یا تایپ نشانی وب</string>
+    <string name="tabs_title">تب‌ها</string>
     <string name="new_tab">تب جدید</string>
-    <string name="new_incognito_tab">تب ناشناس</string>
-    <string name="panic_wipe_done">تاریخچه، کوکی‌ها و حافظه پنهان پاک شد</string>
+    <string name="new_incognito_tab">تب ناشناس جدید</string>
+    <string name="panic_wipe_done">اطلاعات مرور، کوکی‌ها و حافظه پنهان پاک شد</string>
 </resources>

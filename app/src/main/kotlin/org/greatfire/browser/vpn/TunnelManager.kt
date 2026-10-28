@@ -26,6 +26,7 @@ import java.net.InetSocketAddress
 import java.net.Proxy
 import java.net.ServerSocket
 import java.net.Socket
+import java.util.Locale
 import java.util.UUID
 import java.util.concurrent.TimeUnit
 
@@ -36,23 +37,56 @@ data class GatewayStatus(
     val bestNode: String = "",
     val bestProto: String = "",
     val bestRttMs: Long = 0L,
+    val bestSpeedKbps: Long = 0L,
     val directWins: Long = 0L,
     val tunnelWins: Long = 0L,
     val bytesUp: Long = 0L,
     val bytesDown: Long = 0L,
     val customUri: String = ""
-)
+) {
+    fun formattedSpeed(): String {
+        if (bestSpeedKbps <= 0L) return ""
+        return if (bestSpeedKbps >= 1000L) {
+            String.format(Locale.US, "%.1f Mbps", bestSpeedKbps / 1000.0)
+        } else {
+            "${bestSpeedKbps} Kbps"
+        }
+    }
+}
 
 data class ProbeResult(
     val ok: Boolean,
     val latencyMs: Long = 0L,
+    val speedKbps: Long = 0L,
     val bestNode: String = "",
     val error: String? = null
 )
 
+data class VerifiedNodeItem(
+    val id: String,
+    val name: String,
+    val protocol: String,
+    val rttMs: Long,
+    val speedKbps: Long,
+    val active: Boolean
+)
+
+data class SwitchProxyResult(
+    val ok: Boolean,
+    val switchedFrom: String = "",
+    val bestId: String = "",
+    val bestNode: String = "",
+    val bestProto: String = "",
+    val bestRttMs: Long = 0L,
+    val bestSpeedKbps: Long = 0L,
+    val readyNodes: Int = 0,
+    val error: String? = null
+)
+
 /**
- * Lightweight, zero-wait controller for the native GreatFire FreeBrowser/Envoy Go engine (`libgfproxy.so`).
- * Boots in <25ms in the background and routes WebView requests immediately without ever blocking navigation.
+ * Lightweight, zero-wait controller for the native Dr Browser / GreatFire Go engine (`libgfproxy.so`).
+ * Boots in <25ms, automatically connects to the highest-speed proxy for the user's ISP on first launch,
+ * and supports instant 1-tap smart proxy switching.
  */
 class TunnelManager private constructor(private val appContext: Context) {
 
@@ -90,7 +124,7 @@ class TunnelManager private constructor(private val appContext: Context) {
 
     private val controlHttp = OkHttpClient.Builder()
         .connectTimeout(2, TimeUnit.SECONDS)
-        .readTimeout(10, TimeUnit.SECONDS)
+        .readTimeout(12, TimeUnit.SECONDS)
         .proxy(Proxy.NO_PROXY)
         .build()
 
@@ -99,6 +133,13 @@ class TunnelManager private constructor(private val appContext: Context) {
             LegacySslTrustBridge.initialize(appContext)
             ensureDefaultFbConfig()
             ensureRunning()
+            // Fast first-launch burst polling so UI reflects best auto-selected proxy in <1s
+            val fastPollsMs = longArrayOf(350L, 650L, 900L, 1200L, 1600L)
+            for (waitMs in fastPollsMs) {
+                delay(waitMs)
+                val st = pollStatusOnce()
+                if (st != null && st.readyNodes > 0) break
+            }
             startWatchdogLoop()
         }
     }
@@ -150,7 +191,6 @@ class TunnelManager private constructor(private val appContext: Context) {
             return@withLock false
         }
 
-        // Drain stdout/stderr asynchronously so pipe buffer never blocks Go runtime
         scope.launch {
             runCatching {
                 proc.inputStream.bufferedReader().useLines { lines ->
@@ -159,7 +199,6 @@ class TunnelManager private constructor(private val appContext: Context) {
             }
         }
 
-        // Wait up to 400ms (polling every 12ms) for TCP bind — usually ready in <20ms!
         var listening = false
         repeat(34) {
             if (isLocalPortOpen(gwPort)) {
@@ -217,6 +256,7 @@ class TunnelManager private constructor(private val appContext: Context) {
                     bestNode = json.optString("best_node", ""),
                     bestProto = json.optString("best_proto", ""),
                     bestRttMs = json.optLong("best_rtt_ms", 0L),
+                    bestSpeedKbps = json.optLong("best_speed_kbps", 0L),
                     directWins = json.optLong("direct_wins", 0L),
                     tunnelWins = json.optLong("tunnel_wins", 0L),
                     bytesUp = json.optLong("bytes_up", 0L),
@@ -228,6 +268,111 @@ class TunnelManager private constructor(private val appContext: Context) {
             }
         } catch (_: Throwable) {
             null
+        }
+    }
+
+    suspend fun switchToBestFastProxy(): SwitchProxyResult = withContext(Dispatchers.IO) {
+        ensureRunning()
+        val cPort = controlPort
+        if (cPort <= 0) {
+            return@withContext SwitchProxyResult(false, error = "موتور اتصال آماده نیست")
+        }
+        return@withContext try {
+            val req = Request.Builder()
+                .url("http://127.0.0.1:$cPort/switch-best")
+                .header("X-GF-Token", controlToken)
+                .post("{}".toRequestBody("application/json".toMediaType()))
+                .build()
+            controlHttp.newCall(req).execute().use { resp ->
+                val obj = JSONObject(resp.body?.string().ifNullOrBlank { "{}" })
+                val ok = obj.optBoolean("ok", false)
+                if (ok) {
+                    customProxyUri = ""
+                    pollStatusOnce()
+                }
+                SwitchProxyResult(
+                    ok = ok,
+                    switchedFrom = obj.optString("switched_from", ""),
+                    bestId = obj.optString("best_id", ""),
+                    bestNode = obj.optString("best_node", ""),
+                    bestProto = obj.optString("best_proto", ""),
+                    bestRttMs = obj.optLong("best_rtt_ms", 0L),
+                    bestSpeedKbps = obj.optLong("best_speed_kbps", 0L),
+                    readyNodes = obj.optInt("ready_nodes", 0),
+                    error = obj.optString("error", "").ifBlank { null }
+                )
+            }
+        } catch (t: Throwable) {
+            SwitchProxyResult(false, error = t.message)
+        }
+    }
+
+    suspend fun fetchVerifiedNodes(): List<VerifiedNodeItem> = withContext(Dispatchers.IO) {
+        ensureRunning()
+        val cPort = controlPort
+        if (cPort <= 0) return@withContext emptyList()
+        return@withContext try {
+            val req = Request.Builder()
+                .url("http://127.0.0.1:$cPort/nodes")
+                .header("X-GF-Token", controlToken)
+                .build()
+            controlHttp.newCall(req).execute().use { resp ->
+                if (!resp.isSuccessful) return@use emptyList()
+                val obj = JSONObject(resp.body?.string().ifNullOrBlank { "{}" })
+                val arr = obj.optJSONArray("nodes") ?: return@use emptyList()
+                buildList(arr.length()) {
+                    for (i in 0 until arr.length()) {
+                        val item = arr.optJSONObject(i) ?: continue
+                        add(
+                            VerifiedNodeItem(
+                                id = item.optString("id", ""),
+                                name = item.optString("name", "Proxy"),
+                                protocol = item.optString("protocol", "TLS"),
+                                rttMs = item.optLong("rtt_ms", 0L),
+                                speedKbps = item.optLong("speed_kbps", 0L),
+                                active = item.optBoolean("active", false)
+                            )
+                        )
+                    }
+                }
+            }
+        } catch (_: Throwable) {
+            emptyList()
+        }
+    }
+
+    suspend fun selectSpecificNode(nodeId: String): SwitchProxyResult = withContext(Dispatchers.IO) {
+        ensureRunning()
+        val cPort = controlPort
+        if (cPort <= 0) return@withContext SwitchProxyResult(false, error = "موتور اتصال آماده نیست")
+        val payload = JSONObject().put("id", nodeId).toString()
+        return@withContext try {
+            val req = Request.Builder()
+                .url("http://127.0.0.1:$cPort/select-node")
+                .header("X-GF-Token", controlToken)
+                .post(payload.toRequestBody("application/json".toMediaType()))
+                .build()
+            controlHttp.newCall(req).execute().use { resp ->
+                val obj = JSONObject(resp.body?.string().ifNullOrBlank { "{}" })
+                val ok = obj.optBoolean("ok", false)
+                if (ok) {
+                    customProxyUri = ""
+                    pollStatusOnce()
+                }
+                SwitchProxyResult(
+                    ok = ok,
+                    switchedFrom = obj.optString("switched_from", ""),
+                    bestId = obj.optString("best_id", ""),
+                    bestNode = obj.optString("best_node", ""),
+                    bestProto = obj.optString("best_proto", ""),
+                    bestRttMs = obj.optLong("best_rtt_ms", 0L),
+                    bestSpeedKbps = obj.optLong("best_speed_kbps", 0L),
+                    readyNodes = obj.optInt("ready_nodes", 0),
+                    error = obj.optString("error", "").ifBlank { null }
+                )
+            }
+        } catch (t: Throwable) {
+            SwitchProxyResult(false, error = t.message)
         }
     }
 
@@ -289,10 +434,11 @@ class TunnelManager private constructor(private val appContext: Context) {
                 .header("X-GF-Token", controlToken)
                 .build()
             controlHttp.newCall(req).execute().use { resp ->
-                val obj = JSONObject(resp.body?.string().orEmpty())
+                val obj = JSONObject(resp.body?.string().ifNullOrBlank { "{}" })
                 ProbeResult(
                     ok = obj.optBoolean("ok", false),
                     latencyMs = obj.optLong("latency_ms", 0L),
+                    speedKbps = obj.optLong("speed_kbps", 0L),
                     bestNode = obj.optString("best_node", ""),
                     error = obj.optString("error", "").ifBlank { null }
                 )
@@ -373,6 +519,9 @@ class TunnelManager private constructor(private val appContext: Context) {
             }
         }
     }
+
+    private inline fun String?.ifNullOrBlank(fallback: () -> String): String =
+        if (this.isNullOrBlank()) fallback() else this
 
     companion object {
         private const val TAG = "GFProxyEngine"

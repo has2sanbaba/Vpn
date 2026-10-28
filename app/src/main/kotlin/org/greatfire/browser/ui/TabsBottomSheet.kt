@@ -1,12 +1,18 @@
 package org.greatfire.browser.ui
 
+import android.graphics.Color
+import android.graphics.drawable.GradientDrawable
+import android.net.Uri
 import android.os.Bundle
 import android.view.LayoutInflater
 import android.view.View
 import android.view.ViewGroup
-import androidx.recyclerview.widget.LinearLayoutManager
+import androidx.recyclerview.widget.GridLayoutManager
 import androidx.recyclerview.widget.RecyclerView
 import com.google.android.material.bottomsheet.BottomSheetDialogFragment
+import com.google.android.material.snackbar.Snackbar
+import org.greatfire.browser.R
+import org.greatfire.browser.data.BrowserDataStore
 import org.greatfire.browser.databinding.ItemBrowserTabBinding
 import org.greatfire.browser.databinding.SheetTabsBinding
 import org.greatfire.browser.web.BrowserTab
@@ -17,8 +23,11 @@ class TabsBottomSheet : BottomSheetDialogFragment() {
     private var _binding: SheetTabsBinding? = null
     private val binding get() = _binding!!
 
+    private val mainActivity: MainActivity?
+        get() = activity as? MainActivity
+
     private val tabManager: BrowserTabManager?
-        get() = (activity as? MainActivity)?.tabManager
+        get() = mainActivity?.tabManager
 
     override fun onCreateView(
         inflater: LayoutInflater,
@@ -40,15 +49,24 @@ class TabsBottomSheet : BottomSheetDialogFragment() {
             mgr = mgr,
             onSelect = { idx ->
                 mgr.selectTab(idx)
+                mgr.activeTab?.let { mgr.ensureTabLoaded(it) }
                 dismissAllowingStateLoss()
             },
             onClose = { idx ->
-                mgr.closeTab(idx)
+                val closed = mgr.closeTab(idx)
                 binding.rvTabs.adapter?.notifyDataSetChanged()
+                if (closed != null) {
+                    Snackbar.make(binding.root, "تب بسته شد", Snackbar.LENGTH_SHORT)
+                        .setAction("واگرد") {
+                            mainActivity?.openUrlInNewTab(closed.second, incognito = false, selectImmediately = true)
+                            binding.rvTabs.adapter?.notifyDataSetChanged()
+                        }
+                        .show()
+                }
             }
         )
 
-        binding.rvTabs.layoutManager = LinearLayoutManager(requireContext())
+        binding.rvTabs.layoutManager = GridLayoutManager(requireContext(), 2)
         binding.rvTabs.adapter = adapter
 
         binding.btnNewTab.setOnClickListener {
@@ -58,6 +76,11 @@ class TabsBottomSheet : BottomSheetDialogFragment() {
 
         binding.btnNewIncognitoTab.setOnClickListener {
             mgr.createTab(BrowserTabManager.HOME_URL, incognito = true)
+            dismissAllowingStateLoss()
+        }
+
+        binding.btnCloseAllTabs.setOnClickListener {
+            mgr.closeAllTabs(incognitoOnly = false)
             dismissAllowingStateLoss()
         }
     }
@@ -84,16 +107,45 @@ class TabsBottomSheet : BottomSheetDialogFragment() {
 
         override fun onBindViewHolder(holder: VH, position: Int) {
             val tab: BrowserTab = mgr.tabs[position]
-            val activeMark = if (position == mgr.activeIndex) "● " else ""
-            val incog = if (tab.incognito) "🕶 " else ""
-            holder.b.tvTabTitle.text = "$activeMark$incog${tab.title}"
-            holder.b.tvTabUrl.text = if (tab.currentUrl == BrowserTabManager.HOME_URL) {
-                "صفحه شروع FreeBrowser"
-            } else {
-                tab.currentUrl
+            val isActive = position == mgr.activeIndex
+
+            holder.b.tabItemRoot.setBackgroundResource(
+                if (isActive) R.drawable.bg_active_tab_card else R.drawable.bg_card_dark
+            )
+
+            val host = runCatching { Uri.parse(tab.currentUrl).host.orEmpty().removePrefix("www.") }.getOrDefault("")
+            val badgeChar = when {
+                tab.incognito -> "🕶"
+                tab.currentUrl == BrowserTabManager.HOME_URL -> "G"
+                host.isNotEmpty() -> host.first().uppercaseChar().toString()
+                else -> "W"
             }
-            holder.b.tabItemRoot.setOnClickListener { onSelect(position) }
-            holder.b.btnCloseTab.setOnClickListener { onClose(position) }
+            val badgeColor = when {
+                tab.incognito -> Color.parseColor("#35363A")
+                tab.currentUrl == BrowserTabManager.HOME_URL -> Color.parseColor("#4285F4")
+                else -> Color.parseColor(BrowserDataStore.pickBadgeColor(host))
+            }
+            holder.b.tvTabBadge.text = badgeChar
+            holder.b.tvTabBadge.background = GradientDrawable().apply {
+                shape = GradientDrawable.OVAL
+                setColor(badgeColor)
+            }
+
+            holder.b.tvTabTitle.text = tab.title
+            holder.b.tvTabUrl.text = if (tab.currentUrl == BrowserTabManager.HOME_URL) {
+                if (tab.incognito) "تب ناشناس جدید" else "صفحه تب جدید"
+            } else {
+                host.ifBlank { tab.currentUrl }
+            }
+
+            holder.b.tabItemRoot.setOnClickListener {
+                val pos = holder.bindingAdapterPosition
+                if (pos != RecyclerView.NO_POSITION) onSelect(pos)
+            }
+            holder.b.btnCloseTab.setOnClickListener {
+                val pos = holder.bindingAdapterPosition
+                if (pos != RecyclerView.NO_POSITION) onClose(pos)
+            }
         }
     }
 }

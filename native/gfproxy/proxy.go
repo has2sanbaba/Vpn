@@ -458,6 +458,7 @@ type StatusResponse struct {
 	BestNode          string        `json:"best_node,omitempty"`
 	BestProto         string        `json:"best_proto,omitempty"`
 	BestRTTMs         int64         `json:"best_rtt_ms,omitempty"`
+	BestSpeedKbps     int64         `json:"best_speed_kbps,omitempty"`
 	DirectWins        uint64        `json:"direct_wins"`
 	TunnelWins        uint64        `json:"tunnel_wins"`
 	Config            RuntimeConfig `json:"config"`
@@ -467,6 +468,7 @@ type ProbeResponse struct {
 	OK        bool   `json:"ok"`
 	Status    int    `json:"status"`
 	LatencyMs int64  `json:"latency_ms"`
+	SpeedKbps int64  `json:"speed_kbps,omitempty"`
 	Mode      string `json:"mode"`
 	BestNode  string `json:"best_node,omitempty"`
 	Error     string `json:"error,omitempty"`
@@ -487,7 +489,7 @@ func NewControlMux(gw *GatewayServer, router *UpstreamRouter, doh *DoHResolver, 
 		if !authorized(w, r) {
 			return
 		}
-		bestName, bestProto, bestRTT, readyCnt := gw.pool.BestNodeSummary()
+		bestName, bestProto, bestRTT, bestSpeed, readyCnt := gw.pool.BestNodeSummary()
 		cfg := router.GetConfig()
 		cfg.CustomURI = gw.pool.GetCustomURI()
 		resp := StatusResponse{
@@ -505,12 +507,68 @@ func NewControlMux(gw *GatewayServer, router *UpstreamRouter, doh *DoHResolver, 
 			BestNode:          bestName,
 			BestProto:         bestProto,
 			BestRTTMs:         bestRTT,
+			BestSpeedKbps:     bestSpeed,
 			DirectWins:        gw.racer.DirectWins.Load(),
 			TunnelWins:        gw.racer.TunnelWins.Load(),
 			Config:            cfg,
 		}
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(resp)
+	})
+
+	mux.HandleFunc("/nodes", func(w http.ResponseWriter, r *http.Request) {
+		if !authorized(w, r) {
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"ok":    true,
+			"nodes": gw.pool.ListReadyNodes(),
+		})
+	})
+
+	mux.HandleFunc("/select-node", func(w http.ResponseWriter, r *http.Request) {
+		if !authorized(w, r) {
+			return
+		}
+		if r.Method != http.MethodPost {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		var reqBody struct {
+			ID string `json:"id"`
+		}
+		if err := json.NewDecoder(io.LimitReader(r.Body, 4096)).Decode(&reqBody); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		res, ok := gw.pool.SelectNodeByID(reqBody.ID)
+		if ok {
+			gw.racer.ResetMethodCache()
+		}
+		w.Header().Set("Content-Type", "application/json")
+		if !ok {
+			w.WriteHeader(http.StatusNotFound)
+		}
+		_ = json.NewEncoder(w).Encode(res)
+	})
+
+	mux.HandleFunc("/switch-best", func(w http.ResponseWriter, r *http.Request) {
+		if !authorized(w, r) {
+			return
+		}
+		if r.Method != http.MethodPost {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		ctx, cancel := context.WithTimeout(r.Context(), 6*time.Second)
+		defer cancel()
+		res := gw.pool.SwitchToBestDifferentNode(ctx)
+		if res.OK {
+			gw.racer.ResetMethodCache()
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(res)
 	})
 
 	mux.HandleFunc("/config", func(w http.ResponseWriter, r *http.Request) {
@@ -585,13 +643,14 @@ func NewControlMux(gw *GatewayServer, router *UpstreamRouter, doh *DoHResolver, 
 
 		resp, err := client.Do(req)
 		elapsed := time.Since(start).Milliseconds()
-		bestName, _, _, _ := gw.pool.BestNodeSummary()
+		bestName, _, _, bestSpeed, _ := gw.pool.BestNodeSummary()
 
 		w.Header().Set("Content-Type", "application/json")
 		if err != nil {
 			_ = json.NewEncoder(w).Encode(ProbeResponse{
 				OK:        false,
 				LatencyMs: elapsed,
+				SpeedKbps: bestSpeed,
 				Mode:      string(router.GetConfig().Mode),
 				BestNode:  bestName,
 				Error:     err.Error(),
@@ -603,6 +662,7 @@ func NewControlMux(gw *GatewayServer, router *UpstreamRouter, doh *DoHResolver, 
 			OK:        resp.StatusCode >= 200 && resp.StatusCode < 400,
 			Status:    resp.StatusCode,
 			LatencyMs: elapsed,
+			SpeedKbps: bestSpeed,
 			Mode:      string(router.GetConfig().Mode),
 			BestNode:  bestName,
 		})

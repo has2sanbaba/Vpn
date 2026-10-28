@@ -13,6 +13,7 @@ import (
 	"crypto/x509/pkix"
 	"encoding/base64"
 	"encoding/binary"
+	"encoding/json"
 	"io"
 	"math/big"
 	"net"
@@ -600,3 +601,82 @@ func generateSelfSignedCert(t *testing.T, dnsName string) tls.Certificate {
 		PrivateKey:  priv,
 	}
 }
+
+func TestSwitchToBestDifferentProxyAndSpeedScoring(t *testing.T) {
+	doh := NewDoHResolver()
+	router := NewUpstreamRouter(doh, RuntimeConfig{Mode: ModeAntiDPI, FragEnabled: true})
+	pool := NewNodePool(doh, "")
+
+	n1, _ := ParseSingleShareLink("socks5://127.0.0.1:10801#Fast-DE")
+	n2, _ := ParseSingleShareLink("socks5://127.0.0.1:10802#Fast-NL")
+	n3, _ := ParseSingleShareLink("socks5://127.0.0.1:10803#Slow-US")
+
+	pool.mu.Lock()
+	pool.probeHook = func(node OutboundNode) (int64, int64, bool) {
+		switch node.Name {
+		case "Fast-DE":
+			return 95, 18500, true
+		case "Fast-NL":
+			return 118, 15200, true
+		case "Slow-US":
+			return 340, 280, true
+		default:
+			return 0, 0, false
+		}
+	}
+	pool.mu.Unlock()
+
+	pool.upsertVerifiedNode(n3, 340, 280)
+	pool.upsertVerifiedNode(n2, 118, 15200)
+	pool.upsertVerifiedNode(n1, 95, 18500)
+
+	bestName, _, bestRTT, bestSpeed, cnt := pool.BestNodeSummary()
+	if cnt != 3 || bestName != "Fast-DE" || bestRTT != 95 || bestSpeed != 18500 {
+		t.Fatalf("expected initial best Fast-DE (95ms, 18500kbps), got %s (%dms, %dkbps, cnt=%d)", bestName, bestRTT, bestSpeed, cnt)
+	}
+
+	racer := NewConnectionRacer(router, pool, "")
+	gw := NewGatewayServer(router, doh, pool, racer)
+	mux := NewControlMux(gw, router, doh, "secret123")
+
+	// Call POST /switch-best -> must switch AWAY from Fast-DE to the fastest remaining proxy (Fast-NL, NOT Slow-US!)
+	req := httptest.NewRequest(http.MethodPost, "/switch-best", nil)
+	req.Header.Set("X-GF-Token", "secret123")
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK from /switch-best, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var sw SwitchBestResult
+	if err := json.Unmarshal(rec.Body.Bytes(), &sw); err != nil {
+		t.Fatalf("decode SwitchBestResult: %v", err)
+	}
+	if !sw.OK || sw.SwitchedFrom != "Fast-DE" || sw.BestNode != "Fast-NL" {
+		t.Fatalf("expected switch Fast-DE -> Fast-NL, got %+v", sw)
+	}
+
+	// Verify /nodes endpoint marks Fast-NL active
+	reqNodes := httptest.NewRequest(http.MethodGet, "/nodes", nil)
+	reqNodes.Header.Set("X-GF-Token", "secret123")
+	recNodes := httptest.NewRecorder()
+	mux.ServeHTTP(recNodes, reqNodes)
+	if recNodes.Code != http.StatusOK || !strings.Contains(recNodes.Body.String(), `"Fast-NL"`) {
+		t.Fatalf("unexpected /nodes output: %s", recNodes.Body.String())
+	}
+
+	// Verify /select-node manual selection back to Fast-DE
+	selBody := bytes.NewBufferString(`{"id":"` + n1.ID + `"}`)
+	reqSel := httptest.NewRequest(http.MethodPost, "/select-node", selBody)
+	reqSel.Header.Set("X-GF-Token", "secret123")
+	recSel := httptest.NewRecorder()
+	mux.ServeHTTP(recSel, reqSel)
+	if recSel.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK from /select-node, got %d", recSel.Code)
+	}
+	nowBest, _, _, _, _ := pool.BestNodeSummary()
+	if nowBest != "Fast-DE" {
+		t.Fatalf("expected manual select to activate Fast-DE, got %s", nowBest)
+	}
+}
+

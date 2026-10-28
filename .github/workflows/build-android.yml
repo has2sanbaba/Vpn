@@ -1,4 +1,4 @@
-name: Build FreeBrowser v3.0 Lightweight Anti-Censorship Browser
+name: Build Dr Browser v4.0 Chrome-Parity Anti-Censorship Browser
 
 on:
   push:
@@ -23,7 +23,7 @@ permissions:
 
 jobs:
   build-android:
-    name: Build & Verify Lightweight FreeBrowser v3.0 (API 21–35+, All 4 ABIs)
+    name: Build & Verify Dr Browser v4.0 (API 21–35+, All 4 ABIs)
     runs-on: ubuntu-latest
     timeout-minutes: 30
 
@@ -48,11 +48,12 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/go/pkg/mod
-          key: go-mod-freebrowser-v3-${{ hashFiles('native/gfproxy/go.mod') }}
+          key: go-mod-drbrowser-v4-${{ hashFiles('native/gfproxy/go.mod') }}
           restore-keys: |
+            go-mod-drbrowser-v4-
             go-mod-freebrowser-v3-
 
-      - name: Resolve Go Modules & Run Parallel-Racer Engine Unit Tests
+      - name: Resolve Go Modules & Run Parallel-Racer + Best-Speed Proxy Engine Tests
         working-directory: native/gfproxy
         run: |
           GOTOOLCHAIN=auto go mod tidy
@@ -85,7 +86,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: app/src/main/jniLibs
-          key: jnilibs-freebrowser-v3-${{ hashFiles('scripts/build-gfproxy-android.sh', 'native/gfproxy/**') }}
+          key: jnilibs-drbrowser-v4-${{ hashFiles('scripts/build-gfproxy-android.sh', 'native/gfproxy/**') }}
 
       - name: Cross-Compile Lightweight libgfproxy.so (All 4 ABIs, API 21, 16KB Page Aligned)
         if: steps.cache-jni.outputs.cache-hit != 'true'
@@ -134,13 +135,13 @@ jobs:
           REL_DIR="app/build/outputs/apk/release"
           mkdir -p dist
 
-          cp "$REL_DIR/app-universal-release.apk"   "dist/FreeBrowser-v3.0.0-universal-release.apk"
-          cp "$REL_DIR/app-arm64-v8a-release.apk"   "dist/FreeBrowser-v3.0.0-arm64-v8a-release.apk"
-          cp "$REL_DIR/app-armeabi-v7a-release.apk" "dist/FreeBrowser-v3.0.0-armeabi-v7a-release.apk"
-          cp "$REL_DIR/app-x86_64-release.apk"      "dist/FreeBrowser-v3.0.0-x86_64-release.apk"
-          cp "$REL_DIR/app-x86-release.apk"         "dist/FreeBrowser-v3.0.0-x86-release.apk"
+          cp "$REL_DIR/app-universal-release.apk"   "dist/Dr-Browser-v4.0.0-universal-release.apk"
+          cp "$REL_DIR/app-arm64-v8a-release.apk"   "dist/Dr-Browser-v4.0.0-arm64-v8a-release.apk"
+          cp "$REL_DIR/app-armeabi-v7a-release.apk" "dist/Dr-Browser-v4.0.0-armeabi-v7a-release.apk"
+          cp "$REL_DIR/app-x86_64-release.apk"      "dist/Dr-Browser-v4.0.0-x86_64-release.apk"
+          cp "$REL_DIR/app-x86-release.apk"         "dist/Dr-Browser-v4.0.0-x86-release.apk"
 
-          UNIV="dist/FreeBrowser-v3.0.0-universal-release.apk"
+          UNIV="dist/Dr-Browser-v4.0.0-universal-release.apk"
           unzip -l "$UNIV" > zip_list.txt
 
           for abi in armeabi-v7a arm64-v8a x86 x86_64; do
@@ -172,13 +173,12 @@ jobs:
           echo "::notice title=BuiltAPKs::${NOTICE_BODY}"
 
           {
-            echo "## ⚡ FreeBrowser v3.0 — Instant Zero-Wait Chrome-Style Anti-Censorship Browser"
+            echo "## ⚡ Dr Browser v4.0 — Full Google Chrome Feature Parity + Smart Best-Speed Anti-Censorship Engine"
             echo ""
-            echo "- **Architecture:** Modeled directly on GreatFire **AppMaker** + **FreeBrowser** (\`pkg/proxy.go\` + \`pkg/request.go\` parallel transport racer + \`method_data.json\` eTLD+1 domain memory)"
-            echo "- **Zero Connection Wait (\`0ms\` UI):** Opens immediately to a clean Chrome-like browser; filtered websites bypass censorship transparently per-request in parallel"
+            echo "- **Custom Exclusive Icon:** Adaptive + Legacy \`Dr\` Chrome-orbital launcher icon across all Android densities"
+            echo "- **100% Google Chrome Features:** Full Long-Press Link/Image/Text Context Menu (Open in New Tab, Incognito, Copy Link/Text, Share, Download, Google Lens), Floating Text Selection (Copy, Share, Web Search, Translate), Bookmarks, Searchable History, Clear Browsing Data, Downloads Manager, Recent Tabs + Undo, 2-Column Chrome Grid Tab Switcher, Live Omnibox Autocomplete, Voice Search, Translate Page, Print/Save PDF, File Upload, Light/Dark Themes"
+            echo "- **Smart Proxy Speed Selector:** Auto-connects to the fastest verified proxy on first launch + 1-tap \`⚡ اتصال به پروکسی دیگر با بهترین سرعت\` benchmarking real throughput & latency on the user's ISP"
             echo "- **Supported Android Versions:** Android 5.0 Lollipop (\`API 21\`) → Android 16 (\`API 35+\`, 16 KB page-aligned)"
-            echo "- **Supported CPU Architectures:** \`arm64-v8a\`, \`armeabi-v7a\`, \`x86_64\`, \`x86\` + \`universal\`"
-            echo "- **Single Lightweight Native Engine (\`libgfproxy.so\`):** Fragmented DoH + Chrome \`uTLS\` + TLS ClientHello Desync + Parallel VLESS (\`Reality\` / \`WS\` / \`TCP\`) + Trojan + Shadowsocks AEAD + HTTP/SOCKS5 Racer"
             echo ""
             echo "### 📦 Ready-to-Install Lightweight Release APKs"
             echo "| File | Size | SHA-256 |"
@@ -194,7 +194,7 @@ jobs:
       - name: Upload Signed Release APKs Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: FreeBrowser-v3-APKs
+          name: Dr-Browser-v4-APKs
           path: dist/*
           if-no-files-found: error
           retention-days: 90
@@ -202,7 +202,7 @@ jobs:
       - name: Upload Debug Universal APK Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: FreeBrowser-v3-Debug-APK
+          name: Dr-Browser-v4-Debug-APK
           path: app/build/outputs/apk/debug/app-universal-debug.apk
           if-no-files-found: warn
           retention-days: 30
@@ -211,13 +211,13 @@ jobs:
         if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v') || github.event.inputs.publish_release == 'true'
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || format('v3.0.0-build.{0}', github.run_number) }}
-          name: "FreeBrowser v3.0 Lightweight (${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || format('Build #{0}', github.run_number) }})"
+          tag_name: ${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || format('v4.0.0-build.{0}', github.run_number) }}
+          name: "Dr Browser v4.0 Chrome Edition (${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || format('Build #{0}', github.run_number) }})"
           generate_release_notes: true
           files: |
-            dist/FreeBrowser-v3.0.0-universal-release.apk
-            dist/FreeBrowser-v3.0.0-arm64-v8a-release.apk
-            dist/FreeBrowser-v3.0.0-armeabi-v7a-release.apk
-            dist/FreeBrowser-v3.0.0-x86_64-release.apk
-            dist/FreeBrowser-v3.0.0-x86-release.apk
+            dist/Dr-Browser-v4.0.0-universal-release.apk
+            dist/Dr-Browser-v4.0.0-arm64-v8a-release.apk
+            dist/Dr-Browser-v4.0.0-armeabi-v7a-release.apk
+            dist/Dr-Browser-v4.0.0-x86_64-release.apk
+            dist/Dr-Browser-v4.0.0-x86-release.apk
             dist/SHA256SUMS.txt

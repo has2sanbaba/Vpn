@@ -138,6 +138,13 @@ func (cr *ConnectionRacer) recordWinningMethod(eTldPlusOne, kind string) {
 	cr.mu.Unlock()
 }
 
+func (cr *ConnectionRacer) ResetMethodCache() {
+	cr.mu.Lock()
+	cr.methodData = make(map[string]string)
+	cr.dirty.Store(true)
+	cr.mu.Unlock()
+}
+
 func domainETLDPlusOne(host string) string {
 	h := strings.ToLower(strings.TrimSpace(host))
 	if h == "" || net.ParseIP(h) != nil {

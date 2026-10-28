@@ -1,5 +1,6 @@
 package org.greatfire.browser.web
 
+import android.content.Intent
 import android.graphics.Bitmap
 import android.net.Uri
 import android.net.http.SslError
@@ -19,7 +20,8 @@ import java.util.Locale
 class EnvoyWebViewClient(
     private val tunnelManager: TunnelManager,
     private val onUrlChanged: (WebView, String) -> Unit,
-    private val onLoadingStateChanged: (WebView, Boolean) -> Unit
+    private val onLoadingStateChanged: (WebView, Boolean) -> Unit,
+    private val onHistoryVisited: ((title: String, url: String) -> Unit)? = null
 ) : WebViewClient() {
 
     override fun shouldOverrideUrlLoading(view: WebView, request: WebResourceRequest): Boolean {
@@ -39,7 +41,45 @@ class EnvoyWebViewClient(
             return true
         }
         val scheme = Uri.parse(url).scheme?.lowercase(Locale.ENGLISH) ?: return false
-        return scheme !in ALLOWED_WEB_SCHEMES
+        if (scheme in ALLOWED_WEB_SCHEMES) {
+            return false
+        }
+
+        // Authentic Chrome handling for intent:// links with browser_fallback_url security hardening
+        if (scheme == "intent") {
+            return runCatching {
+                val parsed = Intent.parseUri(url, Intent.URI_INTENT_SCHEME).apply {
+                    addCategory(Intent.CATEGORY_BROWSABLE)
+                    component = null
+                    selector = null
+                }
+                val pm = view.context.packageManager
+                if (parsed.resolveActivity(pm) != null) {
+                    view.context.startActivity(parsed)
+                } else {
+                    val fallback = parsed.getStringExtra("browser_fallback_url")
+                    if (!fallback.isNullOrBlank() &&
+                        (fallback.startsWith("https://", true) || fallback.startsWith("http://", true))
+                    ) {
+                        view.loadUrl(fallback)
+                    }
+                }
+                true
+            }.getOrDefault(true)
+        }
+
+        // Handle tel:, mailto:, sms:, geo:, market: safely via external system chooser
+        if (scheme in EXTERNAL_SAFE_SCHEMES) {
+            runCatching {
+                val extIntent = Intent(Intent.ACTION_VIEW, Uri.parse(url)).apply {
+                    addCategory(Intent.CATEGORY_BROWSABLE)
+                }
+                view.context.startActivity(extIntent)
+            }
+            return true
+        }
+
+        return true
     }
 
     override fun shouldInterceptRequest(view: WebView, request: WebResourceRequest): WebResourceResponse? {
@@ -47,7 +87,6 @@ class EnvoyWebViewClient(
         val scheme = uri.scheme?.lowercase(Locale.ENGLISH) ?: return null
         if (scheme != "http" && scheme != "https") return null
 
-        // 1. Lightweight built-in Ad & Tracker blocker
         val host = uri.host?.lowercase(Locale.ENGLISH).orEmpty()
         if (tunnelManager.adBlockEnabled && isBlockedTrackerHost(host)) {
             return WebResourceResponse(
@@ -60,7 +99,6 @@ class EnvoyWebViewClient(
             )
         }
 
-        // 2. Legacy WebView client-level fallback ONLY on very old factory WebViews lacking PROXY_OVERRIDE
         if (WebViewProxyConfigurator.requiresClientInterception &&
             request.method.equals("GET", ignoreCase = true) &&
             !request.requestHeaders.containsKey("Range") &&
@@ -115,10 +153,23 @@ class EnvoyWebViewClient(
         onLoadingStateChanged(view, true)
     }
 
+    override fun doUpdateVisitedHistory(view: WebView, url: String?, isReload: Boolean) {
+        super.doUpdateVisitedHistory(view, url, isReload)
+        if (!url.isNullOrBlank() && url != BrowserTabManager.HOME_URL && url != "about:blank") {
+            onUrlChanged(view, url)
+            if (!isReload) {
+                onHistoryVisited?.invoke(view.title.orEmpty(), url)
+            }
+        }
+    }
+
     override fun onPageFinished(view: WebView, url: String?) {
         super.onPageFinished(view, url)
         if (url != null) {
             onUrlChanged(view, url)
+            if (url != BrowserTabManager.HOME_URL && url != "about:blank") {
+                onHistoryVisited?.invoke(view.title.orEmpty(), url)
+            }
         }
         onLoadingStateChanged(view, false)
     }
@@ -151,7 +202,8 @@ class EnvoyWebViewClient(
     }
 
     companion object {
-        private val ALLOWED_WEB_SCHEMES = setOf("http", "https", "about", "data", "blob")
+        private val ALLOWED_WEB_SCHEMES = setOf("http", "https", "about", "data", "blob", "javascript")
+        private val EXTERNAL_SAFE_SCHEMES = setOf("tel", "mailto", "sms", "geo", "market")
 
         private val TRACKER_SUFFIXES = listOf(
             "doubleclick.net",

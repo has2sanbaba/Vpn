@@ -1,123 +1,156 @@
 <?xml version="1.0" encoding="utf-8"?>
-<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+<ScrollView xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:app="http://schemas.android.com/apk/res-auto"
     android:layout_width="match_parent"
     android:layout_height="wrap_content"
-    android:background="@color/gf_bg_surface"
-    android:orientation="vertical"
-    android:padding="20dp">
-
-    <TextView
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:text="تنظیمات اتصال هوشمند"
-        android:textColor="@color/gf_text_primary"
-        android:textSize="17sp"
-        android:textStyle="bold" />
-
-    <TextView
-        android:id="@+id/tvDialogStatus"
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:layout_marginTop="8dp"
-        android:background="@drawable/bg_card_dark"
-        android:lineSpacingExtra="3dp"
-        android:padding="12dp"
-        android:text="وضعیت: فعال و خودکار"
-        android:textColor="@color/gf_text_secondary"
-        android:textSize="13sp" />
+    android:background="@color/gf_bg_surface">
 
     <LinearLayout
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:layout_marginTop="10dp"
-        android:orientation="horizontal">
+        android:orientation="vertical"
+        android:padding="20dp">
 
-        <com.google.android.material.button.MaterialButton
-            android:id="@+id/btnDialogRefreshNodes"
-            style="@style/Widget.MaterialComponents.Button.OutlinedButton"
-            android:layout_width="0dp"
-            android:layout_height="40dp"
-            android:layout_weight="1"
-            android:insetTop="0dp"
-            android:insetBottom="0dp"
-            android:text="تازه‌سازی سرورها"
-            android:textSize="12sp"
-            app:cornerRadius="10dp" />
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="اتصال هوشمند ضد فیلتر"
+            android:textColor="@color/gf_text_primary"
+            android:textSize="18sp"
+            android:textStyle="bold" />
 
-        <com.google.android.material.button.MaterialButton
-            android:id="@+id/btnDialogTestPing"
-            style="@style/Widget.MaterialComponents.Button.OutlinedButton"
-            android:layout_width="0dp"
-            android:layout_height="40dp"
-            android:layout_marginStart="8dp"
-            android:layout_weight="1"
-            android:insetTop="0dp"
-            android:insetBottom="0dp"
-            android:text="تست پینگ"
-            android:textSize="12sp"
-            app:cornerRadius="10dp" />
-    </LinearLayout>
-
-    <CheckBox
-        android:id="@+id/cbAdBlock"
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:layout_marginTop="10dp"
-        android:text="حذف تبلیغات مزاحم سایت‌ها"
-        android:textColor="@color/gf_text_primary"
-        android:textSize="13.5sp" />
-
-    <TextView
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:layout_marginTop="10dp"
-        android:text="پروکسی دلخواه (اختیاری — خالی بگذارید تا خودکار کار کند):"
-        android:textColor="@color/gf_text_secondary"
-        android:textSize="12sp" />
-
-    <EditText
-        android:id="@+id/etCustomProxyUri"
-        android:layout_width="match_parent"
-        android:layout_height="44dp"
-        android:layout_marginTop="6dp"
-        android:background="@drawable/bg_omnibox"
-        android:hint="vless://... یا ss://... یا trojan://..."
-        android:importantForAutofill="no"
-        android:inputType="textUri|textNoSuggestions"
-        android:paddingStart="12dp"
-        android:paddingEnd="12dp"
-        android:singleLine="true"
-        android:textColor="@color/gf_text_primary"
-        android:textColorHint="@color/gf_text_secondary"
-        android:textDirection="ltr"
-        android:textSize="12.5sp" />
-
-    <LinearLayout
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:layout_marginTop="16dp"
-        android:gravity="end"
-        android:orientation="horizontal">
-
-        <com.google.android.material.button.MaterialButton
-            android:id="@+id/btnDialogClearCustom"
-            style="@style/Widget.MaterialComponents.Button.TextButton"
-            android:layout_width="wrap_content"
-            android:layout_height="40dp"
-            android:text="حالت خودکار"
+        <TextView
+            android:id="@+id/tvDialogStatus"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="10dp"
+            android:background="@drawable/bg_card_dark"
+            android:lineSpacingExtra="4dp"
+            android:padding="13dp"
+            android:text="وضعیت: فعال و خودکار"
+            android:textColor="@color/gf_text_primary"
             android:textSize="13sp" />
 
+        <!-- Primary Feature Requested by User: Switch to Another Fastest Proxy for Current Internet -->
         <com.google.android.material.button.MaterialButton
-            android:id="@+id/btnDialogSave"
-            android:layout_width="wrap_content"
-            android:layout_height="40dp"
-            android:layout_marginStart="8dp"
+            android:id="@+id/btnSwitchBestProxy"
+            android:layout_width="match_parent"
+            android:layout_height="46dp"
+            android:layout_marginTop="12dp"
             android:insetTop="0dp"
             android:insetBottom="0dp"
-            android:text="ذخیره"
-            android:textSize="13sp"
-            app:cornerRadius="10dp" />
-    </LinearLayout>
+            android:text="⚡ اتصال به پروکسی دیگر با بهترین سرعت"
+            android:textSize="13.5sp"
+            android:textStyle="bold"
+            app:cornerRadius="12dp" />
 
-</LinearLayout>
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="8dp"
+            android:orientation="horizontal">
+
+            <com.google.android.material.button.MaterialButton
+                android:id="@+id/btnDialogTestPing"
+                style="@style/Widget.MaterialComponents.Button.OutlinedButton"
+                android:layout_width="0dp"
+                android:layout_height="40dp"
+                android:layout_weight="1"
+                android:insetTop="0dp"
+                android:insetBottom="0dp"
+                android:text="📶 تست پینگ و سرعت"
+                android:textSize="12sp"
+                app:cornerRadius="10dp" />
+
+            <com.google.android.material.button.MaterialButton
+                android:id="@+id/btnDialogRefreshNodes"
+                style="@style/Widget.MaterialComponents.Button.OutlinedButton"
+                android:layout_width="0dp"
+                android:layout_height="40dp"
+                android:layout_marginStart="8dp"
+                android:layout_weight="1"
+                android:insetTop="0dp"
+                android:insetBottom="0dp"
+                android:text="🔄 بروزرسانی سرورها"
+                android:textSize="12sp"
+                app:cornerRadius="10dp" />
+        </LinearLayout>
+
+        <TextView
+            android:id="@+id/tvVerifiedListHeader"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="14dp"
+            android:text="سریع‌ترین سرورهای آماده برای اینترنت فعلی شما (با لمس هر سرور به آن متصل شوید):"
+            android:textColor="@color/gf_text_secondary"
+            android:textSize="12sp" />
+
+        <LinearLayout
+            android:id="@+id/llVerifiedNodesList"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="6dp"
+            android:orientation="vertical" />
+
+        <CheckBox
+            android:id="@+id/cbAdBlock"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="10dp"
+            android:text="مسدودسازی تبلیغات و پاپ‌آپ‌های مزاحم"
+            android:textColor="@color/gf_text_primary"
+            android:textSize="13.5sp" />
+
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="8dp"
+            android:text="پروکسی اختصاصی دلخواه (اختیاری — خالی بگذارید تا هوشمند کار کند):"
+            android:textColor="@color/gf_text_secondary"
+            android:textSize="12sp" />
+
+        <EditText
+            android:id="@+id/etCustomProxyUri"
+            android:layout_width="match_parent"
+            android:layout_height="42dp"
+            android:layout_marginTop="6dp"
+            android:background="@drawable/bg_omnibox"
+            android:hint="vless://... یا ss://... یا trojan://..."
+            android:importantForAutofill="no"
+            android:inputType="textUri|textNoSuggestions"
+            android:paddingStart="12dp"
+            android:paddingEnd="12dp"
+            android:singleLine="true"
+            android:textColor="@color/gf_text_primary"
+            android:textColorHint="@color/gf_text_secondary"
+            android:textDirection="ltr"
+            android:textSize="12.5sp" />
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="14dp"
+            android:gravity="end"
+            android:orientation="horizontal">
+
+            <com.google.android.material.button.MaterialButton
+                android:id="@+id/btnDialogClearCustom"
+                style="@style/Widget.MaterialComponents.Button.TextButton"
+                android:layout_width="wrap_content"
+                android:layout_height="40dp"
+                android:text="حالت هوشمند خودکار"
+                android:textSize="12.5sp" />
+
+            <com.google.android.material.button.MaterialButton
+                android:id="@+id/btnDialogSave"
+                android:layout_width="wrap_content"
+                android:layout_height="40dp"
+                android:layout_marginStart="8dp"
+                android:insetTop="0dp"
+                android:insetBottom="0dp"
+                android:text="تأیید و بستن"
+                android:textSize="13sp"
+                app:cornerRadius="10dp" />
+        </LinearLayout>
+    </LinearLayout>
+</ScrollView>
