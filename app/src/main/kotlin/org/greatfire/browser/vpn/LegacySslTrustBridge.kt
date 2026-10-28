@@ -81,7 +81,6 @@ object LegacySslTrustBridge {
                 }
             }
 
-            val pemFile = File(context.filesDir, "cacert.pem")
             if (!pemFile.exists() || pemFile.length() < 8192L) {
                 runCatching {
                     pemFile.writeText(pemBuilder.toString(), Charsets.US_ASCII)

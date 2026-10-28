@@ -80,7 +80,15 @@ jobs:
           echo "ANDROID_NDK_HOME=$FOUND_NDK" >> "$GITHUB_ENV"
           echo "Using ANDROID_NDK_HOME=$FOUND_NDK"
 
+      - name: Cache Compiled 4-ABI libgfproxy.so
+        id: cache-jni
+        uses: actions/cache@v4
+        with:
+          path: app/src/main/jniLibs
+          key: jnilibs-freebrowser-v3-${{ hashFiles('scripts/build-gfproxy-android.sh', 'native/gfproxy/**') }}
+
       - name: Cross-Compile Lightweight libgfproxy.so (All 4 ABIs, API 21, 16KB Page Aligned)
+        if: steps.cache-jni.outputs.cache-hit != 'true'
         run: |
           set +e
           ./scripts/build-gfproxy-android.sh > native_build.log 2>&1
