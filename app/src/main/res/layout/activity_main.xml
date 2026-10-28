@@ -1,409 +1,293 @@
 <?xml version="1.0" encoding="utf-8"?>
-<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+<FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:app="http://schemas.android.com/apk/res-auto"
     android:id="@+id/rootLayout"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
-    android:background="@color/gf_bg_primary"
-    android:orientation="vertical">
+    android:background="@color/gf_bg_primary">
 
-    <!-- Top Address & VPN Shield Bar -->
     <LinearLayout
-        android:id="@+id/topToolbar"
+        android:id="@+id/browserChromeRoot"
         android:layout_width="match_parent"
-        android:layout_height="56dp"
-        android:background="@color/gf_bg_surface"
-        android:gravity="center_vertical"
-        android:orientation="horizontal"
-        android:paddingStart="8dp"
-        android:paddingEnd="6dp">
+        android:layout_height="match_parent"
+        android:orientation="vertical">
 
-        <!-- Live VPN Shield Pill -->
+        <!-- Pure Google Chrome Android Top Toolbar -->
         <LinearLayout
-            android:id="@+id/btnVpnShield"
-            android:layout_width="wrap_content"
-            android:layout_height="34dp"
-            android:background="@drawable/bg_shield_pill_connected"
-            android:clickable="true"
-            android:focusable="true"
+            android:id="@+id/topToolbar"
+            android:layout_width="match_parent"
+            android:layout_height="56dp"
+            android:background="@color/gf_bg_surface"
             android:gravity="center_vertical"
             android:orientation="horizontal"
-            android:paddingStart="9dp"
-            android:paddingEnd="10dp">
-
-            <ImageView
-                android:id="@+id/ivShieldIcon"
-                android:layout_width="16dp"
-                android:layout_height="16dp"
-                android:contentDescription="@string/vpn_hub_title"
-                app:srcCompat="@drawable/ic_shield_ok" />
-
-            <TextView
-                android:id="@+id/tvShieldStatus"
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:layout_marginStart="5dp"
-                android:ellipsize="end"
-                android:maxLines="1"
-                android:text="VPN"
-                android:textColor="#FFFFFF"
-                android:textSize="11sp"
-                android:textStyle="bold" />
-        </LinearLayout>
-
-        <!-- Omnibox -->
-        <LinearLayout
-            android:id="@+id/omniboxContainer"
-            android:layout_width="0dp"
-            android:layout_height="40dp"
-            android:layout_marginStart="6dp"
-            android:layout_marginEnd="6dp"
-            android:layout_weight="1"
-            android:background="@drawable/bg_omnibox"
-            android:gravity="center_vertical"
-            android:orientation="horizontal"
-            android:paddingStart="10dp"
+            android:paddingStart="6dp"
             android:paddingEnd="6dp">
 
-            <ImageView
-                android:id="@+id/ivSslState"
-                android:layout_width="16dp"
-                android:layout_height="16dp"
-                android:contentDescription="SSL"
-                app:srcCompat="@drawable/ic_lock" />
+            <ImageButton
+                android:id="@+id/btnHome"
+                android:layout_width="40dp"
+                android:layout_height="40dp"
+                android:background="?attr/selectableItemBackgroundBorderless"
+                android:contentDescription="Home"
+                android:padding="8dp"
+                app:srcCompat="@drawable/ic_home" />
+
+            <!-- Chrome Pill Omnibox -->
+            <LinearLayout
+                android:id="@+id/omniboxContainer"
+                android:layout_width="0dp"
+                android:layout_height="42dp"
+                android:layout_marginStart="4dp"
+                android:layout_marginEnd="8dp"
+                android:layout_weight="1"
+                android:background="@drawable/bg_omnibox"
+                android:gravity="center_vertical"
+                android:orientation="horizontal"
+                android:paddingStart="12dp"
+                android:paddingEnd="6dp">
+
+                <ImageView
+                    android:id="@+id/ivSslState"
+                    android:layout_width="17dp"
+                    android:layout_height="17dp"
+                    android:contentDescription="SSL"
+                    app:srcCompat="@drawable/ic_search" />
+
+                <EditText
+                    android:id="@+id/etUrl"
+                    android:layout_width="0dp"
+                    android:layout_height="match_parent"
+                    android:layout_marginStart="8dp"
+                    android:layout_weight="1"
+                    android:background="@null"
+                    android:hint="@string/omnibox_hint"
+                    android:imeOptions="actionGo|flagNoExtractUi"
+                    android:importantForAutofill="no"
+                    android:inputType="textUri|textNoSuggestions"
+                    android:selectAllOnFocus="true"
+                    android:singleLine="true"
+                    android:textColor="@color/gf_text_primary"
+                    android:textColorHint="@color/gf_text_secondary"
+                    android:textSize="14.5sp" />
+
+                <ImageButton
+                    android:id="@+id/btnReload"
+                    android:layout_width="32dp"
+                    android:layout_height="32dp"
+                    android:background="?attr/selectableItemBackgroundBorderless"
+                    android:contentDescription="Reload"
+                    android:padding="5dp"
+                    app:srcCompat="@drawable/ic_refresh" />
+            </LinearLayout>
+
+            <!-- Chrome Square Tab Counter -->
+            <TextView
+                android:id="@+id/btnTabs"
+                android:layout_width="26dp"
+                android:layout_height="26dp"
+                android:layout_marginEnd="4dp"
+                android:background="@drawable/bg_tab_counter"
+                android:clickable="true"
+                android:focusable="true"
+                android:gravity="center"
+                android:text="1"
+                android:textColor="@color/gf_text_primary"
+                android:textSize="11.5sp"
+                android:textStyle="bold" />
+
+            <!-- Chrome 3-Dot Overflow Menu -->
+            <ImageButton
+                android:id="@+id/btnMore"
+                android:layout_width="38dp"
+                android:layout_height="38dp"
+                android:background="?attr/selectableItemBackgroundBorderless"
+                android:contentDescription="Menu"
+                app:srcCompat="@drawable/ic_more" />
+        </LinearLayout>
+
+        <!-- Subtle Chrome Hairline Divider -->
+        <View
+            android:layout_width="match_parent"
+            android:layout_height="1dp"
+            android:background="@color/gf_border" />
+
+        <!-- Thin Chrome Linear Progress Bar -->
+        <ProgressBar
+            android:id="@+id/progressBar"
+            style="?android:attr/progressBarStyleHorizontal"
+            android:layout_width="match_parent"
+            android:layout_height="2.5dp"
+            android:max="100"
+            android:progress="0"
+            android:progressTint="@color/gf_accent"
+            android:visibility="gone" />
+
+        <!-- Optional Find-in-Page Bar -->
+        <LinearLayout
+            android:id="@+id/findInPageBar"
+            android:layout_width="match_parent"
+            android:layout_height="44dp"
+            android:background="@color/gf_card_surface"
+            android:gravity="center_vertical"
+            android:orientation="horizontal"
+            android:paddingStart="12dp"
+            android:paddingEnd="8dp"
+            android:visibility="gone">
 
             <EditText
-                android:id="@+id/etUrl"
+                android:id="@+id/etFindQuery"
                 android:layout_width="0dp"
                 android:layout_height="match_parent"
-                android:layout_marginStart="6dp"
                 android:layout_weight="1"
                 android:background="@null"
-                android:hint="@string/omnibox_hint"
-                android:imeOptions="actionGo|flagNoExtractUi"
+                android:hint="جستجو در صفحه…"
+                android:imeOptions="actionSearch"
                 android:importantForAutofill="no"
-                android:inputType="textUri|textNoSuggestions"
+                android:inputType="text"
                 android:singleLine="true"
                 android:textColor="@color/gf_text_primary"
                 android:textColorHint="@color/gf_text_secondary"
-                android:textDirection="ltr"
                 android:textSize="13.5sp" />
 
+            <Button
+                android:id="@+id/btnFindNext"
+                style="@style/Widget.MaterialComponents.Button.TextButton"
+                android:layout_width="wrap_content"
+                android:layout_height="36dp"
+                android:minWidth="48dp"
+                android:text="بعدی"
+                android:textColor="@color/gf_accent"
+                android:textSize="12.5sp" />
+
             <ImageButton
-                android:id="@+id/btnReload"
-                android:layout_width="30dp"
-                android:layout_height="30dp"
+                android:id="@+id/btnFindClose"
+                android:layout_width="34dp"
+                android:layout_height="34dp"
                 android:background="?attr/selectableItemBackgroundBorderless"
-                android:contentDescription="Reload"
-                android:padding="4dp"
-                app:srcCompat="@drawable/ic_refresh" />
+                android:contentDescription="Close Find"
+                app:srcCompat="@drawable/ic_close" />
         </LinearLayout>
 
-        <!-- Tab Counter -->
-        <TextView
-            android:id="@+id/btnTabs"
-            android:layout_width="30dp"
-            android:layout_height="28dp"
-            android:background="@drawable/bg_tab_counter"
-            android:clickable="true"
-            android:focusable="true"
-            android:gravity="center"
-            android:text="1"
-            android:textColor="@color/gf_text_primary"
-            android:textSize="12sp"
-            android:textStyle="bold" />
-
-        <!-- Overflow Menu -->
-        <ImageButton
-            android:id="@+id/btnMore"
-            android:layout_width="36dp"
-            android:layout_height="36dp"
-            android:layout_marginStart="2dp"
-            android:background="?attr/selectableItemBackgroundBorderless"
-            android:contentDescription="Menu"
-            app:srcCompat="@drawable/ic_more" />
-    </LinearLayout>
-
-    <!-- Page Loading Progress -->
-    <ProgressBar
-        android:id="@+id/progressBar"
-        style="?android:attr/progressBarStyleHorizontal"
-        android:layout_width="match_parent"
-        android:layout_height="3dp"
-        android:max="100"
-        android:progress="0"
-        android:progressTint="@color/gf_accent"
-        android:visibility="gone" />
-
-    <!-- Optional Find-in-Page Bar -->
-    <LinearLayout
-        android:id="@+id/findInPageBar"
-        android:layout_width="match_parent"
-        android:layout_height="44dp"
-        android:background="@color/gf_bg_elevated"
-        android:gravity="center_vertical"
-        android:orientation="horizontal"
-        android:paddingStart="12dp"
-        android:paddingEnd="8dp"
-        android:visibility="gone">
-
-        <EditText
-            android:id="@+id/etFindQuery"
-            android:layout_width="0dp"
-            android:layout_height="match_parent"
-            android:layout_weight="1"
-            android:background="@null"
-            android:hint="جستجو در صفحه…"
-            android:imeOptions="actionSearch"
-            android:importantForAutofill="no"
-            android:inputType="text"
-            android:singleLine="true"
-            android:textColor="@color/gf_text_primary"
-            android:textColorHint="@color/gf_text_secondary"
-            android:textSize="13sp" />
-
-        <Button
-            android:id="@+id/btnFindNext"
-            style="@style/Widget.MaterialComponents.Button.TextButton"
-            android:layout_width="wrap_content"
-            android:layout_height="36dp"
-            android:minWidth="48dp"
-            android:text="بعدی"
-            android:textColor="@color/gf_accent"
-            android:textSize="12sp" />
-
-        <ImageButton
-            android:id="@+id/btnFindClose"
-            android:layout_width="34dp"
-            android:layout_height="34dp"
-            android:background="?attr/selectableItemBackgroundBorderless"
-            android:contentDescription="Close Find"
-            app:srcCompat="@drawable/ic_close" />
-    </LinearLayout>
-
-    <!-- Main Browser Viewport + Start Dashboard -->
-    <FrameLayout
-        android:id="@+id/contentFrame"
-        android:layout_width="match_parent"
-        android:layout_height="0dp"
-        android:layout_weight="1">
-
-        <androidx.swiperefreshlayout.widget.SwipeRefreshLayout
-            android:id="@+id/swipeRefresh"
+        <!-- Main Browser Viewport + Chrome New Tab Page -->
+        <FrameLayout
+            android:id="@+id/contentFrame"
             android:layout_width="match_parent"
-            android:layout_height="match_parent">
+            android:layout_height="0dp"
+            android:layout_weight="1">
 
-            <FrameLayout
-                android:id="@+id/webViewContainer"
+            <androidx.swiperefreshlayout.widget.SwipeRefreshLayout
+                android:id="@+id/swipeRefresh"
                 android:layout_width="match_parent"
-                android:layout_height="match_parent" />
-        </androidx.swiperefreshlayout.widget.SwipeRefreshLayout>
+                android:layout_height="match_parent">
 
-        <!-- Start / Home Dashboard -->
-        <ScrollView
-            android:id="@+id/homeDashboard"
-            android:layout_width="match_parent"
-            android:layout_height="match_parent"
-            android:background="@color/gf_bg_primary"
-            android:fillViewport="true">
+                <FrameLayout
+                    android:id="@+id/webViewContainer"
+                    android:layout_width="match_parent"
+                    android:layout_height="match_parent" />
+            </androidx.swiperefreshlayout.widget.SwipeRefreshLayout>
 
-            <LinearLayout
+            <!-- Clean Google Chrome-Style New Tab Page -->
+            <ScrollView
+                android:id="@+id/homeDashboard"
                 android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:orientation="vertical"
-                android:padding="16dp">
+                android:layout_height="match_parent"
+                android:background="@color/gf_bg_primary"
+                android:fillViewport="true">
 
-                <!-- GreatFire VPN Live Hero Card -->
                 <LinearLayout
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
-                    android:background="@drawable/bg_card_dark"
+                    android:gravity="center_horizontal"
                     android:orientation="vertical"
-                    android:padding="16dp">
+                    android:paddingStart="22dp"
+                    android:paddingTop="52dp"
+                    android:paddingEnd="22dp"
+                    android:paddingBottom="28dp">
 
+                    <!-- Minimalist Chrome-like Wordmark -->
+                    <TextView
+                        android:id="@+id/tvBrandLogo"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:fontFamily="sans-serif-medium"
+                        android:letterSpacing="-0.02"
+                        android:text="FreeBrowser"
+                        android:textColor="@color/gf_text_primary"
+                        android:textSize="34sp"
+                        android:textStyle="bold" />
+
+                    <!-- Centered Chrome Search Pill -->
                     <LinearLayout
                         android:layout_width="match_parent"
-                        android:layout_height="wrap_content"
+                        android:layout_height="50dp"
+                        android:layout_marginTop="26dp"
+                        android:background="@drawable/bg_omnibox"
                         android:gravity="center_vertical"
-                        android:orientation="horizontal">
+                        android:orientation="horizontal"
+                        android:paddingStart="16dp"
+                        android:paddingEnd="14dp">
 
                         <ImageView
-                            android:id="@+id/ivHeroShield"
-                            android:layout_width="32dp"
-                            android:layout_height="32dp"
-                            android:contentDescription="Shield"
-                            app:srcCompat="@drawable/ic_shield_ok"
-                            app:tint="@color/gf_accent" />
+                            android:layout_width="20dp"
+                            android:layout_height="20dp"
+                            android:contentDescription="Search"
+                            app:srcCompat="@drawable/ic_search" />
 
-                        <LinearLayout
+                        <EditText
+                            android:id="@+id/etHomeSearch"
                             android:layout_width="0dp"
-                            android:layout_height="wrap_content"
-                            android:layout_marginStart="12dp"
+                            android:layout_height="match_parent"
+                            android:layout_marginStart="10dp"
                             android:layout_weight="1"
-                            android:orientation="vertical">
-
-                            <TextView
-                                android:id="@+id/tvHeroTitle"
-                                android:layout_width="wrap_content"
-                                android:layout_height="wrap_content"
-                                android:text="تونل ضد فیلتر GreatFire فعال است"
-                                android:textColor="@color/gf_text_primary"
-                                android:textSize="15sp"
-                                android:textStyle="bold" />
-
-                            <TextView
-                                android:id="@+id/tvHeroProfile"
-                                android:layout_width="wrap_content"
-                                android:layout_height="wrap_content"
-                                android:layout_marginTop="2dp"
-                                android:text="موتور هوشمند: Envoy + IEnvoyProxy + FreeBrowser DoH"
-                                android:textColor="@color/gf_accent"
-                                android:textSize="12.5sp" />
-                        </LinearLayout>
+                            android:background="@null"
+                            android:hint="@string/home_search_hint"
+                            android:imeOptions="actionSearch|flagNoExtractUi"
+                            android:importantForAutofill="no"
+                            android:inputType="textUri|textNoSuggestions"
+                            android:singleLine="true"
+                            android:textColor="@color/gf_text_primary"
+                            android:textColorHint="@color/gf_text_secondary"
+                            android:textSize="15sp" />
                     </LinearLayout>
 
-                    <TextView
-                        android:id="@+id/tvHeroMetrics"
-                        android:layout_width="match_parent"
-                        android:layout_height="wrap_content"
-                        android:layout_marginTop="12dp"
-                        android:text="↓ 0 KB   ↑ 0 KB   •   DoH: فعال   •   Kill-Switch: روشن"
-                        android:textColor="@color/gf_text_secondary"
-                        android:textDirection="ltr"
-                        android:textSize="12sp" />
-
+                    <!-- 2x4 Circular Chrome Speed-Dial Shortcuts -->
                     <LinearLayout
+                        android:id="@+id/quickLinksContainer"
                         android:layout_width="match_parent"
                         android:layout_height="wrap_content"
-                        android:layout_marginTop="14dp"
-                        android:orientation="horizontal">
+                        android:layout_marginTop="32dp"
+                        android:orientation="vertical" />
 
-                        <com.google.android.material.button.MaterialButton
-                            android:id="@+id/btnHeroToggleVpn"
-                            android:layout_width="0dp"
-                            android:layout_height="42dp"
-                            android:layout_weight="1"
-                            android:insetTop="0dp"
-                            android:insetBottom="0dp"
-                            android:text="@string/btn_disconnect"
-                            android:textSize="12.5sp"
-                            app:cornerRadius="12dp" />
-
-                        <com.google.android.material.button.MaterialButton
-                            android:id="@+id/btnHeroOpenHub"
-                            style="@style/Widget.MaterialComponents.Button.OutlinedButton"
-                            android:layout_width="0dp"
-                            android:layout_height="42dp"
-                            android:layout_marginStart="8dp"
-                            android:layout_weight="1"
-                            android:insetTop="0dp"
-                            android:insetBottom="0dp"
-                            android:text="سرورها و پروتکل‌ها"
-                            android:textColor="@color/gf_accent"
-                            android:textSize="12.5sp"
-                            app:cornerRadius="12dp"
-                            app:strokeColor="@color/gf_accent" />
-                    </LinearLayout>
-
-                    <com.google.android.material.button.MaterialButton
-                        android:id="@+id/btnHeroProbe"
-                        style="@style/Widget.MaterialComponents.Button.TextButton"
+                    <Space
                         android:layout_width="match_parent"
-                        android:layout_height="36dp"
-                        android:layout_marginTop="6dp"
-                        android:insetTop="0dp"
-                        android:insetBottom="0dp"
-                        android:text="⚡ تست سلامت و پینگ تونل ضد فیلتر"
+                        android:layout_height="0dp"
+                        android:layout_weight="1" />
+
+                    <!-- Whisper-quiet 1-line subtle status (tap for optional proxy settings) -->
+                    <TextView
+                        android:id="@+id/tvSubtleStatus"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="28dp"
+                        android:background="?attr/selectableItemBackground"
+                        android:clickable="true"
+                        android:focusable="true"
+                        android:gravity="center"
+                        android:padding="8dp"
+                        android:text="● عبور خودکار از فیلترینگ فعال است"
                         android:textColor="@color/gf_text_secondary"
                         android:textSize="12sp" />
                 </LinearLayout>
-
-                <!-- Quick Access Section -->
-                <TextView
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:layout_marginTop="20dp"
-                    android:layout_marginBottom="10dp"
-                    android:text="دسترسی سریع بدون فیلتر"
-                    android:textColor="@color/gf_text_primary"
-                    android:textSize="14sp"
-                    android:textStyle="bold" />
-
-                <LinearLayout
-                    android:id="@+id/quickLinksContainer"
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:orientation="vertical" />
-
-                <!-- Architecture Info Footer -->
-                <TextView
-                    android:id="@+id/tvDeviceCompatInfo"
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:layout_marginTop="20dp"
-                    android:gravity="center"
-                    android:lineSpacingExtra="3dp"
-                    android:text="Powered by GreatFire Envoy • Chromium Cronet • IEnvoyProxy • FreeBrowser"
-                    android:textColor="@color/gf_text_secondary"
-                    android:textSize="11sp" />
-            </LinearLayout>
-        </ScrollView>
-    </FrameLayout>
-
-    <!-- Bottom Ergonomic Navigation Bar -->
-    <LinearLayout
-        android:id="@+id/bottomNavBar"
-        android:layout_width="match_parent"
-        android:layout_height="48dp"
-        android:background="@color/gf_bg_surface"
-        android:gravity="center"
-        android:orientation="horizontal">
-
-        <ImageButton
-            android:id="@+id/btnBack"
-            android:layout_width="0dp"
-            android:layout_height="match_parent"
-            android:layout_weight="1"
-            android:background="?attr/selectableItemBackgroundBorderless"
-            android:contentDescription="Back"
-            app:srcCompat="@drawable/ic_arrow_back" />
-
-        <ImageButton
-            android:id="@+id/btnForward"
-            android:layout_width="0dp"
-            android:layout_height="match_parent"
-            android:layout_weight="1"
-            android:background="?attr/selectableItemBackgroundBorderless"
-            android:contentDescription="Forward"
-            app:srcCompat="@drawable/ic_arrow_forward" />
-
-        <ImageButton
-            android:id="@+id/btnHome"
-            android:layout_width="0dp"
-            android:layout_height="match_parent"
-            android:layout_weight="1"
-            android:background="?attr/selectableItemBackgroundBorderless"
-            android:contentDescription="Home"
-            app:srcCompat="@drawable/ic_home" />
-
-        <ImageButton
-            android:id="@+id/btnPanicWipe"
-            android:layout_width="0dp"
-            android:layout_height="match_parent"
-            android:layout_weight="1"
-            android:background="?attr/selectableItemBackgroundBorderless"
-            android:contentDescription="Panic Wipe"
-            app:srcCompat="@drawable/ic_wipe" />
-
-        <ImageButton
-            android:id="@+id/btnBottomVpn"
-            android:layout_width="0dp"
-            android:layout_height="match_parent"
-            android:layout_weight="1"
-            android:background="?attr/selectableItemBackgroundBorderless"
-            android:contentDescription="VPN Settings"
-            app:srcCompat="@drawable/ic_shield_ok"
-            app:tint="@color/gf_accent" />
+            </ScrollView>
+        </FrameLayout>
     </LinearLayout>
 
-</LinearLayout>
+    <!-- Fullscreen HTML5 Video Container (YouTube, etc.) -->
+    <FrameLayout
+        android:id="@+id/fullscreenContainer"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:background="#000000"
+        android:visibility="gone" />
+
+</FrameLayout>

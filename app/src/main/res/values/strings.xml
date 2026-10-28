@@ -1,26 +1,10 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <string name="app_name">GreatFire VPN Browser</string>
-    <string name="omnibox_hint">جستجو یا آدرس سایت (همه سایت‌ها از VPN عبور می‌کنند)…</string>
-    <string name="vpn_connected">متصل</string>
-    <string name="vpn_connecting">درحال اتصال…</string>
-    <string name="vpn_disconnected">قطع (Kill-Switch)</string>
-    <string name="vpn_direct">مستقیم</string>
-    <string name="vpn_hub_title">سپر ضد فیلتر و VPN داخلی (GreatFire)</string>
-    <string name="vpn_hub_subtitle">موتور ترکیبی Envoy + Cronet + IEnvoyProxy + FreeBrowser</string>
-    <string name="btn_connect">اتصال VPN</string>
-    <string name="btn_disconnect">قطع اتصال</string>
-    <string name="btn_test_all">تست پینگ همه</string>
-    <string name="btn_import_clipboard">افزودن از کلیپ‌بورد</string>
-    <string name="btn_add_custom">افزودن سرور / اشتراک</string>
-    <string name="kill_switch_label">قفل امنیتی Kill-Switch (جلوگیری ۱۰۰٪ از نشت آی‌پی در زمان قطع VPN)</string>
-    <string name="adblock_label">مسدودساز تبلیغات و ردیاب‌ها</string>
-    <string name="webrtc_shield_label">محافظ نشت آی‌پی WebRTC</string>
+    <string name="app_name">FreeBrowser</string>
+    <string name="omnibox_hint">جستجو در گوگل یا تایپ آدرس وب</string>
+    <string name="home_search_hint">جستجو در گوگل یا وارد کردن آدرس سایت…</string>
     <string name="tabs_title">تب‌های باز</string>
     <string name="new_tab">تب جدید</string>
     <string name="new_incognito_tab">تب ناشناس</string>
-    <string name="panic_wipe_done">تمام کوکی‌ها، تاریخچه، کش و تب‌ها پاک‌سازی شدند</string>
-    <string name="notif_channel_name">سرویس تونل ضد فیلتر GreatFire</string>
-    <string name="notif_running_title">مرورگر ضد فیلتر GreatFire فعال است</string>
-    <string name="notif_disconnect">قطع</string>
+    <string name="panic_wipe_done">تاریخچه، کوکی‌ها و حافظه پنهان پاک شد</string>
 </resources>

@@ -33,20 +33,21 @@ const (
 
 // RuntimeConfig holds hot-swappable gateway routing settings.
 type RuntimeConfig struct {
-	Mode          TunnelMode `json:"mode"`
-	UpstreamAddr  string     `json:"upstream_addr"`  // e.g. 127.0.0.1:47000 or host:port
-	UpstreamUser  string     `json:"upstream_user"`  // optional SOCKS5/HTTP auth username
-	UpstreamPass  string     `json:"upstream_pass"`  // optional SOCKS5/HTTP auth password
-	EnvoyURL      string     `json:"envoy_url"`      // e.g. https://allowed.example.com/path/
-	EnvoyAddress  string     `json:"envoy_address"`  // optional hardcoded IP for Envoy host
-	EnvoyHostHdr  string     `json:"envoy_host_hdr"` // optional Host header override for Envoy
-	EnvoySalt     string     `json:"envoy_salt"`     // cache-busting salt
-	DoHServer     string     `json:"doh_server"`     // optional custom DoH server
-	FragEnabled   bool       `json:"frag_enabled"`   // TLS ClientHello & HTTP fragmentation
-	FragSize      int        `json:"frag_size"`      // TLS record split size in bytes
-	FragDelayMs   int        `json:"frag_delay_ms"`  // inter-fragment delay in milliseconds
-	FbConfigPath  string     `json:"fb_config_path"` // optional GreatFire fb.config CDN fronting file
-	ProfileName   string     `json:"profile_name"`   // human-readable active profile label
+	Mode         TunnelMode `json:"mode"`
+	UpstreamAddr string     `json:"upstream_addr"`  // e.g. 127.0.0.1:47000 or host:port
+	UpstreamUser string     `json:"upstream_user"`  // optional SOCKS5/HTTP auth username
+	UpstreamPass string     `json:"upstream_pass"`  // optional SOCKS5/HTTP auth password
+	CustomURI    string     `json:"custom_uri"`     // optional user vless://, trojan://, ss://, socks5:// URI
+	EnvoyURL     string     `json:"envoy_url"`      // e.g. https://allowed.example.com/path/
+	EnvoyAddress string     `json:"envoy_address"`  // optional hardcoded IP for Envoy host
+	EnvoyHostHdr string     `json:"envoy_host_hdr"` // optional Host header override for Envoy
+	EnvoySalt    string     `json:"envoy_salt"`     // cache-busting salt
+	DoHServer    string     `json:"doh_server"`     // optional custom DoH server
+	FragEnabled  bool       `json:"frag_enabled"`   // TLS ClientHello & HTTP fragmentation
+	FragSize     int        `json:"frag_size"`      // TLS record split size in bytes
+	FragDelayMs  int        `json:"frag_delay_ms"`  // inter-fragment delay in milliseconds
+	FbConfigPath string     `json:"fb_config_path"` // optional GreatFire fb.config CDN fronting file
+	ProfileName  string     `json:"profile_name"`   // human-readable active profile label
 }
 
 type CDNFrontNode struct {
@@ -177,6 +178,11 @@ func (r *UpstreamRouter) dialAntiDPI(ctx context.Context, cfg RuntimeConfig, tar
 		return nil, fmt.Errorf("DoH resolution failed for %s: %w", targetHost, err)
 	}
 
+	// If target resolves onto Cloudflare Anycast CDN, append a clean Cloudflare Anycast IP as fallback
+	if targetPort == "443" && len(ips) > 0 && isCloudflareIP(ips[0]) {
+		ips = append(ips, cleanCloudflareEdgeIPs[0])
+	}
+
 	var lastErr error
 	maxTry := len(ips)
 	if maxTry > 3 {
@@ -184,7 +190,7 @@ func (r *UpstreamRouter) dialAntiDPI(ctx context.Context, cfg RuntimeConfig, tar
 	}
 	for i := 0; i < maxTry; i++ {
 		var d net.Dialer
-		d.Timeout = 10 * time.Second
+		d.Timeout = 4 * time.Second
 		conn, dialErr := d.DialContext(ctx, "tcp", net.JoinHostPort(ips[i], targetPort))
 		if dialErr == nil {
 			if cfg.FragEnabled {
