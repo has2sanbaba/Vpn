@@ -36,6 +36,12 @@
         android:visible="true"
         app:showAsAction="ifRoom"/>
     <item
+        android:id="@+id/action_dr_proxy"
+        android:title="@string/action_dr_proxy"/>
+    <item
+        android:id="@+id/action_dr_idm"
+        android:title="@string/action_dr_idm"/>
+    <item
         android:id="@+id/action_new_tab"
         android:title="@string/action_new_tab"/>
     <item
