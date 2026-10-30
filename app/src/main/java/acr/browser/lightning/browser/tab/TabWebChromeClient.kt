@@ -244,7 +244,7 @@ class TabWebChromeClient @Inject constructor(
         origin: String,
         callback: GeolocationPermissions.Callback
     ) {
-        val handleLocationPrompt = { allGranted: Boolean ->
+        val handleLocationPrompt: (Boolean) -> Unit = { allGranted: Boolean ->
             if (allGranted) {
                 val remember = true
                 AlertDialog.Builder(activity).apply {
