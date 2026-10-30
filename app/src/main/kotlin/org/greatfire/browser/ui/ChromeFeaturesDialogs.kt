@@ -1039,10 +1039,10 @@ object ChromeFeaturesDialogs {
                 }
 
                 val statusColor = when (d.state) {
-                    DownloadState.COMPLETED -> R.color.gf_emerald
+                    DownloadState.COMPLETED -> R.color.gf_green
                     DownloadState.FAILED, DownloadState.CANCELED -> R.color.gf_danger
                     DownloadState.DOWNLOADING -> R.color.gf_accent
-                    DownloadState.PAUSED -> R.color.gf_amber
+                    DownloadState.PAUSED -> R.color.gf_warning
                 }
 
                 card.addView(TextView(activity).apply {
@@ -1071,7 +1071,7 @@ object ChromeFeaturesDialogs {
 
                 when (d.state) {
                     DownloadState.DOWNLOADING -> {
-                        addActionChip("⏸ توقف موقت", R.color.gf_amber) {
+                        addActionChip("⏸ توقف موقت", R.color.gf_warning) {
                             engine.pauseDownload(d.id)
                         }
                         addActionChip("✕ لغو", R.color.gf_danger) {
