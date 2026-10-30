@@ -140,7 +140,7 @@ class HlsAndIdmSnifferTest {
         val all = VideoStreamSniffer.getMediaForTab(tabId)
         assertEquals(2, all.size)
         assertEquals(SniffedMediaKind.HLS_STREAM, all[0].kind)
-        assertEquals("1080p Full HD", all[0].qualityLabel)
+        assertEquals("1080p استریم", all[0].qualityLabel)
         assertEquals("05:25", all[0].formattedDuration())
         assertTrue(all[0].suggestedFileName().endsWith(".mp4"))
 
