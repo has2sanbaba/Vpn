@@ -470,12 +470,13 @@ type StatusResponse struct {
 	RetestCount       uint64        `json:"retest_count"`
 	BestNode          string        `json:"best_node,omitempty"`
 	BestSource        string        `json:"best_source,omitempty"`
-	BestProto         string        `json:"best_proto,omitempty"`
-	BestRTTMs         int64         `json:"best_rtt_ms,omitempty"`
-	BestSpeedKbps     int64         `json:"best_speed_kbps,omitempty"`
-	DirectWins        uint64        `json:"direct_wins"`
-	TunnelWins        uint64        `json:"tunnel_wins"`
-	Config            RuntimeConfig `json:"config"`
+	BestProto         string                `json:"best_proto,omitempty"`
+	BestRTTMs         int64                 `json:"best_rtt_ms,omitempty"`
+	BestSpeedKbps     int64                 `json:"best_speed_kbps,omitempty"`
+	Suggested         *SuggestedUpgradeInfo `json:"suggested,omitempty"`
+	DirectWins        uint64                `json:"direct_wins"`
+	TunnelWins        uint64                `json:"tunnel_wins"`
+	Config            RuntimeConfig         `json:"config"`
 }
 
 type ProbeResponse struct {
@@ -530,6 +531,7 @@ func NewControlMux(gw *GatewayServer, router *UpstreamRouter, doh *DoHResolver, 
 			BestProto:         bestProto,
 			BestRTTMs:         bestRTT,
 			BestSpeedKbps:     bestSpeed,
+			Suggested:         gw.pool.GetSuggestedUpgrade(),
 			DirectWins:        gw.racer.DirectWins.Load(),
 			TunnelWins:        gw.racer.TunnelWins.Load(),
 			Config:            cfg,
@@ -692,11 +694,38 @@ func NewControlMux(gw *GatewayServer, router *UpstreamRouter, doh *DoHResolver, 
 		if !authorized(w, r) {
 			return
 		}
+		applyFastest := r.URL.Query().Get("apply") == "1" || strings.EqualFold(r.URL.Query().Get("apply"), "true")
 		ctx, cancel := context.WithTimeout(r.Context(), 6500*time.Millisecond)
 		defer cancel()
-		res := gw.pool.RunAutoRetest(ctx)
+		var res SwitchBestResult
+		if applyFastest {
+			res = gw.pool.RunManualRetestAndPromote(ctx)
+			if res.OK {
+				gw.racer.ResetMethodCache()
+			}
+		} else {
+			res = gw.pool.RunAutoRetest(ctx)
+		}
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(res)
+	})
+
+	mux.HandleFunc("/dismiss-suggestion", func(w http.ResponseWriter, r *http.Request) {
+		if !authorized(w, r) {
+			return
+		}
+		var reqBody struct {
+			ID string `json:"id"`
+		}
+		if r.Body != nil {
+			_ = json.NewDecoder(io.LimitReader(r.Body, 4096)).Decode(&reqBody)
+		}
+		if reqBody.ID == "" {
+			reqBody.ID = r.URL.Query().Get("id")
+		}
+		gw.pool.DismissSuggestedUpgrade(reqBody.ID)
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{"ok": true})
 	})
 
 	mux.HandleFunc("/lifecycle", func(w http.ResponseWriter, r *http.Request) {

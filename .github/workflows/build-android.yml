@@ -156,13 +156,13 @@ jobs:
           REL_DIR="app/build/outputs/apk/release"
           mkdir -p dist
 
-          cp "$REL_DIR/app-universal-release.apk"   "dist/Dr-Browser-v7.0.0-universal-release.apk"
-          cp "$REL_DIR/app-arm64-v8a-release.apk"   "dist/Dr-Browser-v7.0.0-arm64-v8a-release.apk"
-          cp "$REL_DIR/app-armeabi-v7a-release.apk" "dist/Dr-Browser-v7.0.0-armeabi-v7a-release.apk"
-          cp "$REL_DIR/app-x86_64-release.apk"      "dist/Dr-Browser-v7.0.0-x86_64-release.apk"
-          cp "$REL_DIR/app-x86-release.apk"         "dist/Dr-Browser-v7.0.0-x86-release.apk"
+          cp "$REL_DIR/app-universal-release.apk"   "dist/Dr-Browser-v8.0.0-universal-release.apk"
+          cp "$REL_DIR/app-arm64-v8a-release.apk"   "dist/Dr-Browser-v8.0.0-arm64-v8a-release.apk"
+          cp "$REL_DIR/app-armeabi-v7a-release.apk" "dist/Dr-Browser-v8.0.0-armeabi-v7a-release.apk"
+          cp "$REL_DIR/app-x86_64-release.apk"      "dist/Dr-Browser-v8.0.0-x86_64-release.apk"
+          cp "$REL_DIR/app-x86-release.apk"         "dist/Dr-Browser-v8.0.0-x86-release.apk"
 
-          UNIV="dist/Dr-Browser-v7.0.0-universal-release.apk"
+          UNIV="dist/Dr-Browser-v8.0.0-universal-release.apk"
           unzip -l "$UNIV" > zip_list.txt
 
           for abi in armeabi-v7a arm64-v8a x86 x86_64; do
@@ -199,12 +199,12 @@ jobs:
           echo "::notice title=BuiltAPKs::${NOTICE_BODY}"
 
           {
-            echo "## ⚡ Dr Browser v7.0 — Audited Lightning-Browser (MPL-2.0) + 50-Source Xray XHTTP/Reality Engine + IDM Downloader"
+            echo "## ⚡ Dr Browser v8.0 — Sticky Anti-Censorship Proxy + Dual-Track HLS Audio/MP4 Merger + Resumable IDM v8"
             echo ""
             echo "- **100% Google Play Protect Compliant:** True \`-buildmode=c-shared\` JNI native engine (\`System.loadLibrary(\"gfproxy\")\`, zero \`ProcessBuilder\`/\`setExecutable\`), zero \`REQUEST_INSTALL_PACKAGES\`, strict \`SslErrorHandler.cancel()\`, zero private-API reflection, clean \`io.github.has2sanbaba.drbrowser\` identity & cached V1+V2+V3 keystore"
-            echo "- **Unmodified Lightning-Browser (MPL-2.0) Privacy Base:** Pure ultra-lightweight Android Views, BloomFilter AdBlock, Reading Mode, Light/Dark/Black themes, zero trackers, low CPU/GPU/RAM footprint"
-            echo "- **50 Live Sources + Full Xray XHTTP/SplitHTTP & Reality + 3-Min Auto-Retest:** Supports \`vless://...type=xhttp\` (\`mode=auto\`/\`packet-up\`/\`stream-one\`), \`REALITY\` + \`xtls-rprx-vision\`, \`gRPC\`, \`WS\`, \`HTTPUpgrade\`, \`VMess\`, \`Trojan\`, \`Shadowsocks\`, Base64 & Clash YAML, plus foreground-aware periodic speed re-testing"
-            echo "- **Scroll-Fixed BottomSheets & Deep SPA Video Rescan:** \`NestedScrollView\` + scroll-locked \`BottomSheetBehavior\` and deterministic \`performance.getEntriesByType('resource')\` + \`fetch\`/\`XHR\` + ShadowDOM/iframe video discovery"
+            echo "- **Sticky Startup Proxy + User-Confirmed Better-Server Upgrade:** Connects automatically at startup and keeps exit IP pinned (never auto-switches mid-session or mid-download); notifies user via Snackbar/card when a significantly faster proxy is found"
+            echo "- **Dual-Track HLS Audio+Video Lossless MP4 Merger + AES-128 & BYTERANGE:** Pairs \`#EXT-X-MEDIA:TYPE=AUDIO\` renditions with video variants, supports \`fMP4\` (\`#EXT-X-MAP\`), MPEG-TS, ADTS \`csd-0\`, Packed-Audio \`ID3\` stripping, and RFC 8216 \`AES-128\`"
+            echo "- **True Shard & Segment Pause/Resume + Rebuilt v8 Video Discovery:** Per-part \`.part0..N\` Range checkpoints & \`.hlsdir/*.done\` segment resume, plus \`DOCUMENT_START\` cross-frame \`JSON.parse\`/\`fetch\`/\`XHR\`/\`#EXTM3U\` primary stream sniffer"
             echo ""
             echo "### 📦 Ready-to-Install Lightweight Release APKs"
             echo "| File | Size | SHA-256 |"
@@ -220,7 +220,7 @@ jobs:
       - name: Upload Signed Release APKs Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: Dr-Browser-v7-APKs
+          name: Dr-Browser-v8-APKs
           path: dist/*
           if-no-files-found: error
           retention-days: 90
@@ -228,7 +228,7 @@ jobs:
       - name: Upload Debug Universal APK Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: Dr-Browser-v7-Debug-APK
+          name: Dr-Browser-v8-Debug-APK
           path: app/build/outputs/apk/debug/app-universal-debug.apk
           if-no-files-found: warn
           retention-days: 30
@@ -237,13 +237,13 @@ jobs:
         if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v') || github.event.inputs.publish_release == 'true'
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || format('v7.0.0-build.{0}', github.run_number) }}
-          name: "Dr Browser v7.0 Privacy + 50-Source XHTTP + IDM (${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || format('Build #{0}', github.run_number) }})"
+          tag_name: ${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || format('v8.0.0-build.{0}', github.run_number) }}
+          name: "Dr Browser v8.0 Sticky Proxy + Audio HLS + Resumable IDM (${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || format('Build #{0}', github.run_number) }})"
           generate_release_notes: true
           files: |
-            dist/Dr-Browser-v7.0.0-universal-release.apk
-            dist/Dr-Browser-v7.0.0-arm64-v8a-release.apk
-            dist/Dr-Browser-v7.0.0-armeabi-v7a-release.apk
-            dist/Dr-Browser-v7.0.0-x86_64-release.apk
-            dist/Dr-Browser-v7.0.0-x86-release.apk
+            dist/Dr-Browser-v8.0.0-universal-release.apk
+            dist/Dr-Browser-v8.0.0-arm64-v8a-release.apk
+            dist/Dr-Browser-v8.0.0-armeabi-v7a-release.apk
+            dist/Dr-Browser-v8.0.0-x86_64-release.apk
+            dist/Dr-Browser-v8.0.0-x86-release.apk
             dist/SHA256SUMS.txt

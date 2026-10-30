@@ -27,6 +27,7 @@ import androidx.fragment.app.FragmentActivity
 import androidx.lifecycle.lifecycleScope
 import com.google.android.material.bottomsheet.BottomSheetBehavior
 import com.google.android.material.bottomsheet.BottomSheetDialog
+import com.google.android.material.snackbar.Snackbar
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
@@ -52,6 +53,59 @@ import java.util.Locale
  * detected-video list scrolling NEVER conflicts with sheet drag gestures.
  */
 object DrBrowserSheets {
+
+    private val shownUpgradeNodeIds = java.util.Collections.synchronizedSet(HashSet<String>())
+
+    /**
+     * Observes background proxy health probes and notifies the user with a non-intrusive
+     * Material [Snackbar] ONLY when a significantly faster verified server is discovered.
+     * The active server is NEVER switched automatically — switching happens ONLY if the user
+     * explicitly taps «تغییر سرور»; otherwise the current exit IP stays pinned!
+     */
+    fun attachProxySuggestionObserver(activity: FragmentActivity, anchorView: View) {
+        val tunnelManager = TunnelManager.getInstance(activity)
+        activity.lifecycleScope.launch {
+            tunnelManager.status.collect { st ->
+                val sug = st.suggestedUpgrade ?: return@collect
+                if (sug.id.isBlank() || !shownUpgradeNodeIds.add(sug.id)) return@collect
+                if (activity.isFinishing || activity.isDestroyed) return@collect
+
+                val gain = (st.bestRttMs - sug.rttMs).coerceAtLeast(0L)
+                val gainStr = if (gain > 0L) " (${gain}ms سریع‌تر)" else ""
+                val msg = "⚡ سرور سریع‌تر پیدا شد: ${sug.name} (${sug.rttMs}ms)$gainStr"
+
+                var userAccepted = false
+                val snackbar = Snackbar.make(anchorView, msg, 9000)
+                    .setBackgroundTint(Color.parseColor("#1F2937"))
+                    .setTextColor(Color.parseColor("#F0F6FC"))
+                    .setActionTextColor(Color.parseColor("#3FB950"))
+                    .setAction("تغییر سرور") {
+                        userAccepted = true
+                        activity.lifecycleScope.launch {
+                            val res = tunnelManager.selectSpecificNode(sug.id)
+                            if (res.ok) {
+                                Toast.makeText(
+                                    activity,
+                                    "✅ سرور تغییر کرد به: ${res.bestNode} (${res.bestRttMs}ms)",
+                                    Toast.LENGTH_SHORT
+                                ).show()
+                            }
+                        }
+                    }
+                    .addCallback(object : Snackbar.Callback() {
+                        override fun onDismissed(transientBottomBar: Snackbar?, event: Int) {
+                            if (!userAccepted && event != DISMISS_EVENT_CONSECUTIVE) {
+                                activity.lifecycleScope.launch {
+                                    tunnelManager.dismissSuggestedUpgrade(sug.id)
+                                }
+                            }
+                        }
+                    })
+                snackbar.view.layoutDirection = View.LAYOUT_DIRECTION_RTL
+                snackbar.show()
+            }
+        }
+    }
 
     private fun dp(context: Context, value: Int): Int =
         (value * context.resources.displayMetrics.density).toInt()
@@ -202,6 +256,61 @@ object DrBrowserSheets {
         statusCard.addView(statusDetails)
         contentCol.addView(statusCard)
 
+        // Optional Better-Server Upgrade Suggestion Banner (User-Confirmed Switch Only!)
+        val suggestionCard = LinearLayout(activity).apply {
+            orientation = LinearLayout.VERTICAL
+            visibility = View.GONE
+            background = roundedBg(Color.parseColor("#182B24"), 14, activity, accentGreen)
+            setPadding(dp(activity, 14), dp(activity, 11), dp(activity, 14), dp(activity, 11))
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            ).apply { bottomMargin = dp(activity, 12) }
+        }
+        val suggestionTitleTv = TextView(activity).apply {
+            setTextColor(Color.parseColor("#3FB950"))
+            textSize = 13f
+            setTypeface(typeface, Typeface.BOLD)
+        }
+        val suggestionSubTv = TextView(activity).apply {
+            setTextColor(textSecondary)
+            textSize = 11.5f
+            setPadding(0, dp(activity, 4), 0, dp(activity, 8))
+            text = "سرور فعلی شما برای جلوگیری از تغییر آی‌پی و قطع دانلود ثابت نگه داشته شده است. آیا مایل به تغییر به سرور سریع‌تر هستید؟"
+        }
+        val suggestionBtnsRow = LinearLayout(activity).apply {
+            orientation = LinearLayout.HORIZONTAL
+        }
+        val acceptUpgradeBtn = TextView(activity).apply {
+            text = "✅ تغییر به سرور سریع‌تر"
+            gravity = Gravity.CENTER
+            setTextColor(Color.WHITE)
+            textSize = 12f
+            setTypeface(typeface, Typeface.BOLD)
+            background = roundedBg(accentGreen, 10, activity)
+            setPadding(dp(activity, 10), dp(activity, 8), dp(activity, 10), dp(activity, 8))
+            layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply {
+                marginEnd = dp(activity, 6)
+            }
+        }
+        val dismissUpgradeBtn = TextView(activity).apply {
+            text = "نگه داشتن سرور فعلی"
+            gravity = Gravity.CENTER
+            setTextColor(textPrimary)
+            textSize = 12f
+            background = roundedBg(Color.parseColor("#30363D"), 10, activity)
+            setPadding(dp(activity, 10), dp(activity, 8), dp(activity, 10), dp(activity, 8))
+            layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply {
+                marginStart = dp(activity, 6)
+            }
+        }
+        suggestionBtnsRow.addView(acceptUpgradeBtn)
+        suggestionBtnsRow.addView(dismissUpgradeBtn)
+        suggestionCard.addView(suggestionTitleTv)
+        suggestionCard.addView(suggestionSubTv)
+        suggestionCard.addView(suggestionBtnsRow)
+        contentCol.addView(suggestionCard)
+
         // Action Buttons Row (High-speed Retest + Switch Best)
         val actionsRow = LinearLayout(activity).apply {
             orientation = LinearLayout.HORIZONTAL
@@ -351,11 +460,39 @@ object DrBrowserSheets {
             }
             val speedStr = st.formattedSpeed().let { if (it.isNotBlank()) " • سرعت: $it" else "" }
             val pingStr = if (st.bestRttMs > 0) "${st.bestRttMs}ms" else "—"
-            val nextSec = st.nextRetestInSec.coerceAtLeast(0L)
             statusDetails.text = buildString {
                 append("پروتکل: ${st.bestProto.uppercase(Locale.US).ifBlank { "SMART" }} • پینگ: $pingStr$speedStr\n")
                 append("سرورهای آماده: ${st.readyNodes} سرور از ${maxOf(st.activeSources, st.reachableSources)}/${st.configuredSources} منبع فعال\n")
-                append("تست خودکار دوره‌ای: فعال (هر ۳ دقیقه — تست بعدی تا ${nextSec} ثانیه دیگر)")
+                append("🔒 آی‌پی ثابت فعال است (تغییر سرور فقط با تایید شما انجام می‌شود)")
+            }
+
+            val sug = st.suggestedUpgrade
+            if (sug != null && sug.id.isNotBlank()) {
+                val gain = (st.bestRttMs - sug.rttMs).coerceAtLeast(0L)
+                val gainTxt = if (gain > 0L) " (${gain}ms پینگ بهتر)" else ""
+                suggestionTitleTv.text = "⚡ سرور سریع‌تر آماده است: ${sug.name} • پینگ ${sug.rttMs}ms$gainTxt"
+                suggestionCard.visibility = View.VISIBLE
+                acceptUpgradeBtn.setOnClickListener {
+                    activity.lifecycleScope.launch {
+                        val res = tunnelManager.selectSpecificNode(sug.id)
+                        if (res.ok) {
+                            Toast.makeText(activity, "✅ متصل به سرور سریع‌تر: ${res.bestNode}", Toast.LENGTH_SHORT).show()
+                        }
+                        tunnelManager.pollStatusOnce()
+                        val fresh = tunnelManager.fetchVerifiedNodes()
+                        val (cList, _) = tunnelManager.fetchCustomConfigsAndSubs()
+                        renderStatusAndNodes(fresh, cList)
+                    }
+                }
+                dismissUpgradeBtn.setOnClickListener {
+                    suggestionCard.visibility = View.GONE
+                    activity.lifecycleScope.launch {
+                        tunnelManager.dismissSuggestedUpgrade(sug.id)
+                        tunnelManager.pollStatusOnce()
+                    }
+                }
+            } else {
+                suggestionCard.visibility = View.GONE
             }
 
             nodesContainer.removeAllViews()
@@ -713,7 +850,8 @@ object DrBrowserSheets {
                                 url = media.url,
                                 mimeType = media.mimeType,
                                 refererUrl = media.pageUrl,
-                                suggestedFileNameOverride = media.suggestedFileName()
+                                suggestedFileNameOverride = media.suggestedFileName(),
+                                secondaryAudioUrl = media.audioUrl
                             )
                             Toast.makeText(activity, "⬇ دانلود آغاز شد: ${media.suggestedFileName()}", Toast.LENGTH_SHORT).show()
                             showingDownloadsTab = true
@@ -884,7 +1022,11 @@ object DrBrowserSheets {
             layoutParams = LinearLayout.LayoutParams(0, 1, 1f)
         }
         val dlBtn = TextView(activity).apply {
-            text = if (media.isHls) "⬇ دانلود و تبدیل به MP4" else "⬇ دانلود پرسرعت"
+            text = when {
+                media.hasPairedAudio -> "⬇ دانلود با صدا (MP4)"
+                media.isHls -> "⬇ دانلود و تبدیل به MP4"
+                else -> "⬇ دانلود پرسرعت"
+            }
             setTextColor(Color.WHITE)
             textSize = 12f
             setTypeface(typeface, Typeface.BOLD)

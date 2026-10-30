@@ -24,6 +24,15 @@ import java.net.Proxy
 import java.util.Locale
 import java.util.concurrent.TimeUnit
 
+data class SuggestedProxyUpgrade(
+    val id: String,
+    val name: String,
+    val source: String = "",
+    val protocol: String = "",
+    val rttMs: Long = 0L,
+    val speedKbps: Long = 0L
+)
+
 data class GatewayStatus(
     val ready: Boolean = false,
     val gatewayPort: Int = 0,
@@ -32,13 +41,14 @@ data class GatewayStatus(
     val configuredSources: Int = 50,
     val reachableSources: Int = 0,
     val lastRetestSecAgo: Long = -1L,
-    val nextRetestInSec: Long = 180L,
+    val nextRetestInSec: Long = 600L,
     val retestCount: Long = 0L,
     val bestNode: String = "",
     val bestSource: String = "",
     val bestProto: String = "",
     val bestRttMs: Long = 0L,
     val bestSpeedKbps: Long = 0L,
+    val suggestedUpgrade: SuggestedProxyUpgrade? = null,
     val directWins: Long = 0L,
     val tunnelWins: Long = 0L,
     val bytesUp: Long = 0L,
@@ -209,7 +219,7 @@ class TunnelManager private constructor(private val appContext: Context) {
             return@withContext SwitchProxyResult(false, error = "موتور اتصال آماده نیست")
         }
         return@withContext try {
-            val raw = NativeProxyBridge.controlRequest("POST", "/retest", "{}")
+            val raw = NativeProxyBridge.controlRequest("POST", "/retest?apply=1", "{}")
             val obj = JSONObject(raw.ifBlank { "{}" })
             val ok = obj.optBoolean("ok", false)
             if (ok) {
@@ -239,6 +249,19 @@ class TunnelManager private constructor(private val appContext: Context) {
             val raw = NativeProxyBridge.controlRequest("GET", "/status")
             val json = JSONObject(raw.ifBlank { "{}" })
             if (!json.optBoolean("ok", false)) return@withContext null
+            val sugObj = json.optJSONObject("suggested")
+            val suggested = if (sugObj != null && sugObj.optString("id").isNotBlank()) {
+                SuggestedProxyUpgrade(
+                    id = sugObj.optString("id", ""),
+                    name = sugObj.optString("name", "Proxy"),
+                    source = sugObj.optString("source", ""),
+                    protocol = sugObj.optString("protocol", ""),
+                    rttMs = sugObj.optLong("rtt_ms", 0L),
+                    speedKbps = sugObj.optLong("speed_kbps", 0L)
+                )
+            } else {
+                null
+            }
             val st = GatewayStatus(
                 ready = true,
                 gatewayPort = gatewayPort,
@@ -247,13 +270,14 @@ class TunnelManager private constructor(private val appContext: Context) {
                 configuredSources = json.optInt("configured_sources", 50),
                 reachableSources = json.optInt("reachable_sources", 0),
                 lastRetestSecAgo = json.optLong("last_retest_sec_ago", -1L),
-                nextRetestInSec = json.optLong("next_retest_in_sec", 180L),
+                nextRetestInSec = json.optLong("next_retest_in_sec", 600L),
                 retestCount = json.optLong("retest_count", 0L),
                 bestNode = json.optString("best_node", ""),
                 bestSource = json.optString("best_source", ""),
                 bestProto = json.optString("best_proto", ""),
                 bestRttMs = json.optLong("best_rtt_ms", 0L),
                 bestSpeedKbps = json.optLong("best_speed_kbps", 0L),
+                suggestedUpgrade = suggested,
                 directWins = json.optLong("direct_wins", 0L),
                 tunnelWins = json.optLong("tunnel_wins", 0L),
                 bytesUp = json.optLong("bytes_up", 0L),
@@ -265,6 +289,13 @@ class TunnelManager private constructor(private val appContext: Context) {
         } catch (_: Throwable) {
             null
         }
+    }
+
+    suspend fun dismissSuggestedUpgrade(nodeId: String) = withContext(Dispatchers.IO) {
+        if (gatewayPort <= 0) return@withContext
+        val payload = JSONObject().put("id", nodeId).toString()
+        runCatching { NativeProxyBridge.controlRequest("POST", "/dismiss-suggestion", payload) }
+        pollStatusOnce()
     }
 
     suspend fun switchToBestFastProxy(): SwitchProxyResult = withContext(Dispatchers.IO) {

@@ -1201,9 +1201,12 @@ func TestFiftyLiveSourcesAndPeriodicAutoRetest(t *testing.T) {
 	pool.mu.Unlock()
 
 	router := NewUpstreamRouter(doh, RuntimeConfig{Mode: ModeAntiDPI})
-	gw := NewGatewayServer(router, doh, pool, nil)
+	racer := NewConnectionRacer(router, pool, "")
+	gw := NewGatewayServer(router, doh, pool, racer)
 	mux := NewControlMux(gw, router, doh, "")
 
+	// 1. Background /retest (sticky mode) MUST keep SlowServer active (stable exit IP!)
+	//    while surfacing UltraFastXHTTP as a user-confirmable Suggested upgrade!
 	codeRetest, rawRetest := InvokeControlHandlerInMemory(mux, http.MethodPost, "/retest", "")
 	if codeRetest != http.StatusOK {
 		t.Fatalf("expected 200 OK from /retest, got %d: %s", codeRetest, rawRetest)
@@ -1212,8 +1215,56 @@ func TestFiftyLiveSourcesAndPeriodicAutoRetest(t *testing.T) {
 	if err := json.Unmarshal([]byte(rawRetest), &rt); err != nil {
 		t.Fatalf("unmarshal /retest: %v", err)
 	}
-	if !rt.OK || rt.BestNode != "UltraFastXHTTP" || rt.BestRTTMs != 22 {
-		t.Fatalf("expected RunAutoRetest to promote UltraFastXHTTP (22ms), got %+v", rt)
+	if !rt.OK || rt.BestNode != "SlowServer" {
+		t.Fatalf("expected background /retest to keep SlowServer sticky (no silent IP change!), got %+v", rt)
+	}
+	if rt.Suggested == nil || rt.Suggested.Name != "UltraFastXHTTP" || rt.Suggested.RTTMs != 22 {
+		t.Fatalf("expected Suggested upgrade UltraFastXHTTP (22ms), got %+v", rt.Suggested)
+	}
+
+	// 2. Verify /status also exposes the suggested upgrade for UI notification
+	_, rawSt := InvokeControlHandlerInMemory(mux, http.MethodGet, "/status", "")
+	var st StatusResponse
+	_ = json.Unmarshal([]byte(rawSt), &st)
+	if st.BestNode != "SlowServer" || st.Suggested == nil || st.Suggested.ID != fastNode.ID {
+		t.Fatalf("expected /status to preserve SlowServer and report Suggested UltraFastXHTTP, got %+v", st)
+	}
+
+	// 3. User clicks "تغییر سرور" -> /select-node switches cleanly to UltraFastXHTTP and clears suggestion
+	selPayload, _ := json.Marshal(map[string]string{"id": fastNode.ID})
+	codeSel, rawSel := InvokeControlHandlerInMemory(mux, http.MethodPost, "/select-node", string(selPayload))
+	if codeSel != http.StatusOK {
+		t.Fatalf("expected 200 OK from /select-node, got %d: %s", codeSel, rawSel)
+	}
+	var selRes SwitchBestResult
+	_ = json.Unmarshal([]byte(rawSel), &selRes)
+	if !selRes.OK || selRes.BestNode != "UltraFastXHTTP" || selRes.BestRTTMs != 22 {
+		t.Fatalf("expected /select-node to switch to UltraFastXHTTP (22ms), got %+v", selRes)
+	}
+	if pool.GetSuggestedUpgrade() != nil {
+		t.Fatalf("expected Suggested upgrade cleared after user accepted switch")
+	}
+
+	// 4. Verify DismissSuggestedUpgrade suppresses unwanted repeat notifications
+	evenFasterNode, _ := ParseSingleShareLink("vless://e947d49f-e235-4e89-9411-5df3ff17acc3@198.51.100.13:443?security=tls&type=ws&sni=faster.example.com#SuperNode")
+	pool.SelectNodeByID(slowNode.ID)
+	pool.upsertVerifiedNode(evenFasterNode, 15, 55000)
+	if sug := pool.GetSuggestedUpgrade(); sug == nil {
+		t.Fatalf("expected upgrade suggestion when back on SlowServer")
+	} else {
+		disPayload, _ := json.Marshal(map[string]string{"id": sug.ID})
+		InvokeControlHandlerInMemory(mux, http.MethodPost, "/dismiss-suggestion", string(disPayload))
+		if after := pool.GetSuggestedUpgrade(); after != nil && after.ID == sug.ID {
+			t.Fatalf("expected dismissed suggestion %s not to reappear immediately", sug.ID)
+		}
+	}
+
+	// 5. Explicit manual user speed-test (/retest?apply=1) promotes fastest server immediately
+	codeManual, rawManual := InvokeControlHandlerInMemory(mux, http.MethodPost, "/retest?apply=1", "")
+	var manualRes SwitchBestResult
+	_ = json.Unmarshal([]byte(rawManual), &manualRes)
+	if codeManual != http.StatusOK || !manualRes.OK || manualRes.BestRTTMs > 25 {
+		t.Fatalf("expected manual /retest?apply=1 to promote fastest server, got %+v", manualRes)
 	}
 
 	codeLC, _ := InvokeControlHandlerInMemory(mux, http.MethodPost, "/lifecycle?foreground=0", "")

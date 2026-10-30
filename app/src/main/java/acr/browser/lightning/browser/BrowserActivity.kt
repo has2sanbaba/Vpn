@@ -360,6 +360,8 @@ abstract class BrowserActivity : ThemableBrowserActivity() {
 
         tabPager.longPressListener = presenter::onPageLongPress
 
+        org.greatfire.browser.ui.DrBrowserSheets.attachProxySuggestionObserver(this, binding.root)
+
         onBackPressedDispatcher.addCallback {
             presenter.onNavigateBack()
         }
