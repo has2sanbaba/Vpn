@@ -21,7 +21,8 @@ class EnvoyWebViewClient(
     private val tunnelManager: TunnelManager,
     private val onUrlChanged: (WebView, String) -> Unit,
     private val onLoadingStateChanged: (WebView, Boolean) -> Unit,
-    private val onHistoryVisited: ((title: String, url: String) -> Unit)? = null
+    private val onHistoryVisited: ((title: String, url: String) -> Unit)? = null,
+    private val onMainFrameNetworkError: ((WebView, String) -> Unit)? = null
 ) : WebViewClient() {
 
     override fun shouldOverrideUrlLoading(view: WebView, request: WebResourceRequest): Boolean {
@@ -147,10 +148,12 @@ class EnvoyWebViewClient(
         if (tunnelManager.webRtcShieldEnabled) {
             view.evaluateJavascript(WEBRTC_SHIELD_JS, null)
         }
-        if (url != null) {
+        if (!url.isNullOrBlank() && url != "about:blank") {
             onUrlChanged(view, url)
         }
-        onLoadingStateChanged(view, true)
+        if (url != "about:blank") {
+            onLoadingStateChanged(view, true)
+        }
     }
 
     override fun doUpdateVisitedHistory(view: WebView, url: String?, isReload: Boolean) {
@@ -165,9 +168,9 @@ class EnvoyWebViewClient(
 
     override fun onPageFinished(view: WebView, url: String?) {
         super.onPageFinished(view, url)
-        if (url != null) {
+        if (!url.isNullOrBlank() && url != "about:blank") {
             onUrlChanged(view, url)
-            if (url != BrowserTabManager.HOME_URL && url != "about:blank") {
+            if (url != BrowserTabManager.HOME_URL) {
                 onHistoryVisited?.invoke(view.title.orEmpty(), url)
             }
         }
@@ -191,6 +194,10 @@ class EnvoyWebViewClient(
         super.onReceivedError(view, request, error)
         if (request.isForMainFrame) {
             onLoadingStateChanged(view, false)
+            val failingUrl = request.url?.toString().orEmpty()
+            if (failingUrl.startsWith("http", ignoreCase = true)) {
+                onMainFrameNetworkError?.invoke(view, failingUrl)
+            }
         }
     }
 

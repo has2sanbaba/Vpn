@@ -29,7 +29,7 @@ data class ClosedTabItem(
 )
 
 enum class DownloadState {
-    DOWNLOADING, COMPLETED, FAILED
+    DOWNLOADING, PAUSED, COMPLETED, FAILED, CANCELED
 }
 
 data class DownloadRecord(
@@ -39,8 +39,12 @@ data class DownloadRecord(
     val mimeType: String,
     val bytesRead: Long = 0L,
     val totalBytes: Long = -1L,
+    val speedBps: Long = 0L,
     val state: DownloadState = DownloadState.DOWNLOADING,
     val localUriOrPath: String = "",
+    val stagingPath: String = "",
+    val refererUrl: String = "",
+    val userAgent: String = "",
     val errorMsg: String = "",
     val createdAt: Long = System.currentTimeMillis()
 )
@@ -337,8 +341,12 @@ class BrowserDataStore private constructor(context: Context) {
                             mimeType = o.optString("mimeType", "application/octet-stream"),
                             bytesRead = o.optLong("bytesRead", 0L),
                             totalBytes = o.optLong("totalBytes", -1L),
+                            speedBps = o.optLong("speedBps", 0L),
                             state = state,
                             localUriOrPath = o.optString("localUriOrPath", ""),
+                            stagingPath = o.optString("stagingPath", ""),
+                            refererUrl = o.optString("refererUrl", ""),
+                            userAgent = o.optString("userAgent", ""),
                             errorMsg = o.optString("errorMsg", ""),
                             createdAt = o.optLong("createdAt", 0L)
                         )
@@ -367,6 +375,22 @@ class BrowserDataStore private constructor(context: Context) {
         prefs.edit().remove(KEY_DOWNLOADS).apply()
     }
 
+    fun recoverInterruptedDownloadsOnStartup() = synchronized(lock) {
+        val current = getDownloads()
+        var changed = false
+        val fixed = current.map { d ->
+            if (d.state == DownloadState.DOWNLOADING) {
+                changed = true
+                d.copy(state = DownloadState.PAUSED, speedBps = 0L)
+            } else {
+                d
+            }
+        }
+        if (changed) {
+            saveDownloadsLocked(fixed)
+        }
+    }
+
     private fun saveDownloadsLocked(list: List<DownloadRecord>) {
         val arr = JSONArray()
         for (d in list) {
@@ -378,8 +402,12 @@ class BrowserDataStore private constructor(context: Context) {
                     put("mimeType", d.mimeType)
                     put("bytesRead", d.bytesRead)
                     put("totalBytes", d.totalBytes)
+                    put("speedBps", d.speedBps)
                     put("state", d.state.name)
                     put("localUriOrPath", d.localUriOrPath)
+                    put("stagingPath", d.stagingPath)
+                    put("refererUrl", d.refererUrl)
+                    put("userAgent", d.userAgent)
                     put("errorMsg", d.errorMsg)
                     put("createdAt", d.createdAt)
                 }

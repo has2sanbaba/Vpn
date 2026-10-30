@@ -32,6 +32,7 @@ type NodeProtocol string
 
 const (
 	ProtoVLESS       NodeProtocol = "vless"
+	ProtoVMess       NodeProtocol = "vmess"
 	ProtoTrojan      NodeProtocol = "trojan"
 	ProtoShadowsocks NodeProtocol = "ss"
 	ProtoSOCKS5      NodeProtocol = "socks5"
@@ -41,6 +42,7 @@ const (
 type OutboundNode struct {
 	ID            string       `json:"id"`
 	Name          string       `json:"name"`
+	Source        string       `json:"source,omitempty"`
 	RawURI        string       `json:"raw_uri"`
 	Protocol      NodeProtocol `json:"protocol"`
 	Host          string       `json:"host"`
@@ -98,28 +100,44 @@ func isCloudflareIP(ipStr string) bool {
 	return false
 }
 
-// ParseShareLinks parses multi-line or base64-encoded subscription text into OutboundNodes.
+// ParseShareLinks parses multi-line, noisy Telegram text, or base64-encoded subscription text into OutboundNodes.
 func ParseShareLinks(rawText string) []OutboundNode {
+	return ParseShareLinksWithSource(rawText, "")
+}
+
+func ParseShareLinksWithSource(rawText string, sourceName string) []OutboundNode {
 	trimmed := strings.TrimSpace(rawText)
 	if trimmed == "" {
 		return nil
 	}
-	if !strings.Contains(trimmed, "://") {
-		if decoded, ok := decodeFlexibleBase64(trimmed); ok && strings.Contains(decoded, "://") {
+
+	// Strip optional #profile-title header lines before attempting Base64 decode if no scheme is present
+	if !containsProxyScheme(trimmed) {
+		var nonCommentLines []string
+		for _, l := range strings.Split(trimmed, "\n") {
+			lt := strings.TrimSpace(l)
+			if lt != "" && !strings.HasPrefix(lt, "#") && !strings.HasPrefix(lt, "//") {
+				nonCommentLines = append(nonCommentLines, lt)
+			}
+		}
+		joined := strings.Join(nonCommentLines, "")
+		if decoded, ok := decodeFlexibleBase64(joined); ok && containsProxyScheme(decoded) {
+			trimmed = decoded
+		} else if decoded, ok := decodeFlexibleBase64(trimmed); ok && containsProxyScheme(decoded) {
 			trimmed = decoded
 		}
 	}
 
+	candidates := extractCandidateURITokens(trimmed)
 	var out []OutboundNode
 	seen := make(map[string]bool)
-	for _, line := range strings.Split(trimmed, "\n") {
-		line = strings.TrimSpace(line)
-		if line == "" || strings.HasPrefix(line, "#") || strings.HasPrefix(line, "//") {
-			continue
-		}
-		node, ok := ParseSingleShareLink(line)
+	for _, token := range candidates {
+		node, ok := ParseSingleShareLink(token)
 		if !ok {
 			continue
+		}
+		if node.Source == "" {
+			node.Source = inferSourceFromRemarkOrDefault(node.Name, sourceName)
 		}
 		if !seen[node.ID] {
 			seen[node.ID] = true
@@ -129,21 +147,144 @@ func ParseShareLinks(rawText string) []OutboundNode {
 	return out
 }
 
+func containsProxyScheme(s string) bool {
+	low := strings.ToLower(s)
+	for _, p := range []string{"vless://", "vmess://", "trojan://", "ss://", "socks5://", "socks5h://", "socks://"} {
+		if strings.Contains(low, p) {
+			return true
+		}
+	}
+	return false
+}
+
+var supportedProxyPrefixes = []string{
+	"vless://",
+	"vmess://",
+	"trojan://",
+	"ss://",
+	"socks5://",
+	"socks5h://",
+	"socks://",
+	"http://",
+}
+
+// extractCandidateURITokens cleanly extracts 1..N proxy URIs even when surrounded by Telegram
+// captions, markdown backticks, quotes, or multiple configs on a single line.
+func extractCandidateURITokens(text string) []string {
+	text = strings.ReplaceAll(text, "\r\n", "\n")
+	text = strings.ReplaceAll(text, "\r", "\n")
+	text = strings.ReplaceAll(text, "`", "\n")
+	text = strings.ReplaceAll(text, "\"", "\n")
+	text = strings.ReplaceAll(text, "'", "\n")
+	text = strings.ReplaceAll(text, "<", "\n")
+	text = strings.ReplaceAll(text, ">", "\n")
+
+	var out []string
+	for _, rawLine := range strings.Split(text, "\n") {
+		line := strings.TrimSpace(rawLine)
+		if line == "" || strings.HasPrefix(line, "#") || strings.HasPrefix(line, "//") {
+			continue
+		}
+		lower := strings.ToLower(line)
+
+		// Find all scheme occurrences inside this line
+		var positions []int
+		for i := 0; i < len(lower); i++ {
+			for _, pref := range supportedProxyPrefixes {
+				if strings.HasPrefix(lower[i:], pref) {
+					// Avoid matching "vless://" inside "vmess://" etc., and avoid matching "ss://" inside "vless://" or "vmess://"
+					if pref == "ss://" && i > 0 {
+						prev := lower[i-1]
+						if prev >= 'a' && prev <= 'z' {
+							continue
+						}
+					}
+					positions = append(positions, i)
+					i += len(pref) - 1
+					break
+				}
+			}
+		}
+
+		if len(positions) == 0 {
+			// Also support bare host:port SOCKS5 shorthand when user enters e.g. 127.0.0.1:10808
+			if h, p, ok := splitHostPortClean(line); ok && !strings.Contains(line, "/") {
+				out = append(out, "socks5://"+net.JoinHostPort(h, p))
+			}
+			continue
+		}
+
+		for idx, start := range positions {
+			end := len(line)
+			if idx+1 < len(positions) {
+				end = positions[idx+1]
+			}
+			seg := strings.TrimSpace(line[start:end])
+			// Strip trailing spaces from URI part before '#', while keeping spaces inside '#remark' if last on line
+			if hashPos := strings.IndexByte(seg, '#'); hashPos > 0 {
+				uriHead := seg[:hashPos]
+				if sp := strings.IndexAny(uriHead, " \t"); sp > 0 {
+					seg = uriHead[:sp]
+				}
+			} else if sp := strings.IndexAny(seg, " \t"); sp > 0 {
+				seg = seg[:sp]
+			}
+			if seg != "" {
+				out = append(out, seg)
+			}
+		}
+	}
+	return out
+}
+
+func inferSourceFromRemarkOrDefault(remark, fallback string) string {
+	r := strings.TrimSpace(remark)
+	if strings.HasPrefix(r, "[") {
+		if closeIdx := strings.IndexByte(r, ']'); closeIdx > 1 && closeIdx <= 20 {
+			return strings.TrimSpace(r[1:closeIdx])
+		}
+	}
+	if fallback != "" {
+		return fallback
+	}
+	return "Global"
+}
+
+// DiagnoseUnsupportedShareLink provides a clear Persian reason when a user pastes an unsupported link type.
+func DiagnoseUnsupportedShareLink(raw string) string {
+	low := strings.ToLower(strings.TrimSpace(raw))
+	switch {
+	case strings.Contains(low, "reality") || strings.Contains(low, "pbk="):
+		return "این کانفیگ از نوع VLESS-Reality است؛ لطفاً کانفیگ‌های استاندارد VLESS (WS/TLS/TCP)، VMess، Trojan، Shadowsocks یا لینک اشتراک (Sub) وارد کنید."
+	case strings.Contains(low, "type=grpc") || strings.Contains(low, "serviceName="):
+		return "کانفیگ‌های نوع gRPC پشتیبانی نمی‌شوند؛ لطفاً کانفیگ نوع WS یا TCP یا لینک اشتراک وارد کنید."
+	case strings.Contains(low, "hysteria2://") || strings.Contains(low, "hy2://") || strings.Contains(low, "tuic://") || strings.Contains(low, "wireguard://"):
+		return "پروتکل Hysteria2/TUIC/WireGuard پشتیبانی نمی‌شود؛ از VLESS، VMess، Trojan، SS، SOCKS5 یا لینک اشتراک استفاده کنید."
+	default:
+		return "فرمت کانفیگ معتبر نیست. لینک‌های مجاز: vless://, vmess://, trojan://, ss://, socks5:// یا لینک اشتراک https://..."
+	}
+}
+
 func ParseSingleShareLink(uri string) (OutboundNode, bool) {
 	uri = strings.TrimSpace(uri)
 	lower := strings.ToLower(uri)
 	switch {
 	case strings.HasPrefix(lower, "vless://"):
 		return parseVLESSLink(uri)
+	case strings.HasPrefix(lower, "vmess://"):
+		return parseVMessLink(uri)
 	case strings.HasPrefix(lower, "trojan://"):
 		return parseTrojanLink(uri)
 	case strings.HasPrefix(lower, "ss://"):
 		return parseShadowsocksLink(uri)
-	case strings.HasPrefix(lower, "socks5://"), strings.HasPrefix(lower, "socks://"):
+	case strings.HasPrefix(lower, "socks5://"), strings.HasPrefix(lower, "socks5h://"), strings.HasPrefix(lower, "socks://"):
 		return parseSOCKSOrHTTPLink(uri, ProtoSOCKS5)
 	case strings.HasPrefix(lower, "http://"):
 		return parseSOCKSOrHTTPLink(uri, ProtoHTTP)
 	default:
+		if h, p, ok := splitHostPortClean(uri); ok && !strings.Contains(uri, "/") {
+			return parseSOCKSOrHTTPLink("socks5://"+net.JoinHostPort(h, p), ProtoSOCKS5)
+		}
 		return OutboundNode{}, false
 	}
 }
@@ -243,7 +384,7 @@ func parseVLESSLink(raw string) (OutboundNode, bool) {
 		// Handled by compatible TLS/WS/SS nodes instead of heavy external daemon
 		return OutboundNode{}, false
 	}
-	if flow := strings.TrimSpace(q.Get("flow")); flow != "" {
+	if flow := strings.ToLower(strings.TrimSpace(q.Get("flow"))); flow != "" && flow != "none" {
 		return OutboundNode{}, false
 	}
 
@@ -535,6 +676,8 @@ func DialOutboundNode(ctx context.Context, doh *DoHResolver, node OutboundNode, 
 	switch node.Protocol {
 	case ProtoVLESS:
 		return dialVLESS(ctx, doh, node, targetHost, targetPort)
+	case ProtoVMess:
+		return dialVMess(ctx, doh, node, targetHost, targetPort)
 	case ProtoTrojan:
 		return dialTrojan(ctx, doh, node, targetHost, targetPort)
 	case ProtoShadowsocks:
@@ -596,7 +739,9 @@ func dialNodeCarrier(ctx context.Context, doh *DoHResolver, node OutboundNode) (
 		if sni == "" && net.ParseIP(node.Host) == nil {
 			sni = node.Host
 		}
-		tlsStream, err := handshakeChromeUTLS(ctx, fragConn, sni, node.Transport == "ws", node.AllowInsecure || sni == "")
+		// Always negotiate http/1.1 on outer TLS carrier so raw TCP VLESS/Trojan/VMess streams
+		// and HTTP/1.1 WebSocket upgrades never get misrouted to Nginx/Caddy HTTP/2 web fallbacks!
+		tlsStream, err := handshakeChromeUTLS(ctx, fragConn, sni, true, node.AllowInsecure || sni == "")
 		if err != nil {
 			_ = rawConn.Close()
 			return nil, err

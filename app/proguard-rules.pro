@@ -1,5 +1,9 @@
-# Keep GreatFire FreeBrowser Kotlin classes
+# Keep GreatFire FreeBrowser Kotlin classes & WebView JavascriptInterface bridges
 -keep class org.greatfire.** { *; }
+-keepattributes JavascriptInterface,*Annotation*
+-keepclassmembers class * {
+    @android.webkit.JavascriptInterface <methods>;
+}
 
 # OkHttp & Conscrypt warnings
 -dontwarn okhttp3.**

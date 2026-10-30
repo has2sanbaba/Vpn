@@ -4,16 +4,20 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/aes"
+	"crypto/cipher"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/sha1"
+	"crypto/sha256"
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/base64"
 	"encoding/binary"
 	"encoding/json"
+	"hash/crc32"
 	"io"
 	"math/big"
 	"net"
@@ -630,7 +634,7 @@ func TestSwitchToBestDifferentProxyAndSpeedScoring(t *testing.T) {
 	pool.upsertVerifiedNode(n2, 118, 15200)
 	pool.upsertVerifiedNode(n1, 95, 18500)
 
-	bestName, _, bestRTT, bestSpeed, cnt := pool.BestNodeSummary()
+	bestName, _, _, bestRTT, bestSpeed, cnt, _ := pool.BestNodeSummary()
 	if cnt != 3 || bestName != "Fast-DE" || bestRTT != 95 || bestSpeed != 18500 {
 		t.Fatalf("expected initial best Fast-DE (95ms, 18500kbps), got %s (%dms, %dkbps, cnt=%d)", bestName, bestRTT, bestSpeed, cnt)
 	}
@@ -674,9 +678,230 @@ func TestSwitchToBestDifferentProxyAndSpeedScoring(t *testing.T) {
 	if recSel.Code != http.StatusOK {
 		t.Fatalf("expected 200 OK from /select-node, got %d", recSel.Code)
 	}
-	nowBest, _, _, _, _ := pool.BestNodeSummary()
+	nowBest, _, _, _, _, _, _ := pool.BestNodeSummary()
 	if nowBest != "Fast-DE" {
 		t.Fatalf("expected manual select to activate Fast-DE, got %s", nowBest)
+	}
+}
+
+func TestVMessAEADParseAndEndToEndRoundTrip(t *testing.T) {
+	uuidStr := "27848739-7e62-4138-9fd3-098a63964b6b"
+	uuidBytes, ok := parseUUIDBytes(uuidStr)
+	if !ok {
+		t.Fatal("invalid uuid")
+	}
+	cmdKey := vmessCmdKey(uuidBytes)
+
+	// Start minimal Xray-compatible VMess AEAD server
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+
+	go func() {
+		conn, aErr := ln.Accept()
+		if aErr != nil {
+			return
+		}
+		defer conn.Close()
+
+		var authID [16]byte
+		if _, err := io.ReadFull(conn, authID[:]); err != nil {
+			return
+		}
+		// Verify AuthID CRC32
+		authBlk, _ := aes.NewCipher(vmessKDF16(cmdKey[:], kdfSaltAuthIDEncryptionKey))
+		var decAuth [16]byte
+		authBlk.Decrypt(decAuth[:], authID[:])
+		if binary.BigEndian.Uint32(decAuth[12:16]) != crc32.ChecksumIEEE(decAuth[0:12]) {
+			return
+		}
+
+		var encHdrLen [18]byte
+		var connNonce [8]byte
+		if _, err := io.ReadFull(conn, encHdrLen[:]); err != nil {
+			return
+		}
+		if _, err := io.ReadFull(conn, connNonce[:]); err != nil {
+			return
+		}
+
+		lenBlk, _ := aes.NewCipher(vmessKDF16(cmdKey[:], kdfSaltVMessHeaderPayloadLenKey, string(authID[:]), string(connNonce[:])))
+		lenGCM, _ := cipher.NewGCM(lenBlk)
+		lenIV := vmessKDF(cmdKey[:], kdfSaltVMessHeaderPayloadLenIV, string(authID[:]), string(connNonce[:]))[:12]
+		decLenB, err := lenGCM.Open(nil, lenIV, encHdrLen[:], authID[:])
+		if err != nil {
+			return
+		}
+		hdrLen := int(binary.BigEndian.Uint16(decLenB))
+
+		encHdr := make([]byte, hdrLen+16)
+		if _, err := io.ReadFull(conn, encHdr); err != nil {
+			return
+		}
+		hdrBlk, _ := aes.NewCipher(vmessKDF16(cmdKey[:], kdfSaltVMessHeaderPayloadKey, string(authID[:]), string(connNonce[:])))
+		hdrGCM, _ := cipher.NewGCM(hdrBlk)
+		hdrIV := vmessKDF(cmdKey[:], kdfSaltVMessHeaderPayloadIV, string(authID[:]), string(connNonce[:]))[:12]
+		plainHdr, err := hdrGCM.Open(nil, hdrIV, encHdr, authID[:])
+		if err != nil || len(plainHdr) < 42 {
+			return
+		}
+
+		var reqIV, reqKey [16]byte
+		copy(reqIV[:], plainHdr[1:17])
+		copy(reqKey[:], plainHdr[17:33])
+		respAuth := plainHdr[33]
+
+		// Read client's first SHAKE128-masked AES-128-GCM body chunk
+		rxMask := newVMessShakeMask(reqIV[:])
+		var szBuf [2]byte
+		if _, err := io.ReadFull(conn, szBuf[:]); err != nil {
+			return
+		}
+		cLen := int(binary.BigEndian.Uint16(szBuf[:]) ^ rxMask.NextMask())
+		encBody := make([]byte, cLen)
+		if _, err := io.ReadFull(conn, encBody); err != nil {
+			return
+		}
+		bodyBlk, _ := aes.NewCipher(reqKey[:])
+		bodyGCM, _ := cipher.NewGCM(bodyBlk)
+		nonce0 := makeVMessChunkNonce(reqIV, 0)
+		msg, err := bodyGCM.Open(nil, nonce0[:], encBody, nil)
+		if err != nil || string(msg) != "PING_VMESS_AEAD" {
+			return
+		}
+
+		// Send AEAD response header + encrypted response chunk
+		respKeySum := sha256.Sum256(reqKey[:])
+		respIVSum := sha256.Sum256(reqIV[:])
+		var respKey, respIV [16]byte
+		copy(respKey[:], respKeySum[:16])
+		copy(respIV[:], respIVSum[:16])
+
+		respHdrPlain := []byte{respAuth, 0x00, 0x00, 0x00}
+		rLenBlk, _ := aes.NewCipher(vmessKDF16(respKey[:], kdfSaltAEADRespHeaderLenKey))
+		rLenGCM, _ := cipher.NewGCM(rLenBlk)
+		rLenIV := vmessKDF(respIV[:], kdfSaltAEADRespHeaderLenIV)[:12]
+		var rLenRaw [2]byte
+		binary.BigEndian.PutUint16(rLenRaw[:], uint16(len(respHdrPlain)))
+		_, _ = conn.Write(rLenGCM.Seal(nil, rLenIV, rLenRaw[:], nil))
+
+		rHdrBlk, _ := aes.NewCipher(vmessKDF16(respKey[:], kdfSaltAEADRespHeaderPayloadKey))
+		rHdrGCM, _ := cipher.NewGCM(rHdrBlk)
+		rHdrIV := vmessKDF(respIV[:], kdfSaltAEADRespHeaderPayloadIV)[:12]
+		_, _ = conn.Write(rHdrGCM.Seal(nil, rHdrIV, respHdrPlain, nil))
+
+		txMask := newVMessShakeMask(respIV[:])
+		txBlk, _ := aes.NewCipher(respKey[:])
+		txGCM, _ := cipher.NewGCM(txBlk)
+		rNonce0 := makeVMessChunkNonce(respIV, 0)
+		sealedPayload := txGCM.Seal(nil, rNonce0[:], []byte("VMESS_AEAD_PONG_OK"), nil)
+		var outSz [2]byte
+		binary.BigEndian.PutUint16(outSz[:], uint16(len(sealedPayload))^txMask.NextMask())
+		_, _ = conn.Write(outSz[:])
+		_, _ = conn.Write(sealedPayload)
+	}()
+
+	host, port, _ := net.SplitHostPort(ln.Addr().String())
+	vmessJSON, _ := json.Marshal(map[string]any{
+		"v":    "2",
+		"ps":   "Test-VMess-Node",
+		"add":  host,
+		"port": port,
+		"id":   uuidStr,
+		"aid":  "0",
+		"scy":  "aes-128-gcm",
+		"net":  "tcp",
+		"type": "none",
+		"tls":  "",
+	})
+	vmessURI := "vmess://" + base64.StdEncoding.EncodeToString(vmessJSON)
+	node, ok := ParseSingleShareLink(vmessURI)
+	if !ok || node.Protocol != ProtoVMess {
+		t.Fatalf("failed parsing vmess link: %+v", node)
+	}
+
+	c, err := DialOutboundNode(context.Background(), nil, node, "www.youtube.com", "443")
+	if err != nil {
+		t.Fatalf("DialOutboundNode VMess: %v", err)
+	}
+	defer c.Close()
+	if _, err := c.Write([]byte("PING_VMESS_AEAD")); err != nil {
+		t.Fatalf("VMess Write: %v", err)
+	}
+	reply, err := io.ReadAll(c)
+	if err != nil {
+		t.Fatalf("VMess Read: %v", err)
+	}
+	if string(reply) != "VMESS_AEAD_PONG_OK" {
+		t.Fatalf("got %q, want VMESS_AEAD_PONG_OK", string(reply))
+	}
+}
+
+func TestMultiSourceSeedsAndCustomConfigManagement(t *testing.T) {
+	seeds := ParseShareLinksWithSource(embeddedSeedNodes, "MultiSeed")
+	if len(seeds) < 60 {
+		t.Fatalf("expected >= 60 embedded multi-source seeds, got %d", len(seeds))
+	}
+	sources := make(map[string]int)
+	protos := make(map[NodeProtocol]int)
+	for _, s := range seeds {
+		sources[s.Source]++
+		protos[s.Protocol]++
+	}
+	if len(sources) < 6 {
+		t.Fatalf("expected >= 6 independent seed sources, got %d: %v", len(sources), sources)
+	}
+	if protos[ProtoVMess] == 0 || protos[ProtoVLESS] == 0 || protos[ProtoShadowsocks] == 0 {
+		t.Fatalf("expected multi-protocol diversity including VMess, VLESS, SS: %v", protos)
+	}
+
+	// Noisy Telegram text extraction + /custom/add + /custom/list + /custom/delete
+	doh := NewDoHResolver()
+	router := NewUpstreamRouter(doh, RuntimeConfig{Mode: ModeAntiDPI})
+	pool := NewNodePool(doh, t.TempDir())
+	pool.mu.Lock()
+	pool.probeHook = func(node OutboundNode) (int64, int64, bool) {
+		return 88, 22000, true
+	}
+	pool.mu.Unlock()
+
+	racer := NewConnectionRacer(router, pool, "")
+	gw := NewGatewayServer(router, doh, pool, racer)
+	mux := NewControlMux(gw, router, doh, "tok")
+
+	noisyTelegramText := "🔥 کانفیگ پرسرعت جدید امشب:\n`vless://b2f2f9f2-1864-48ea-839b-22815faff1f1@104.18.2.161:443?security=tls&type=ws&sni=sub.example.com&path=%2Fws#MyCustomFast` \nکانال ما @test"
+	bodyBytes, _ := json.Marshal(map[string]string{"input": noisyTelegramText})
+	reqAdd := httptest.NewRequest(http.MethodPost, "/custom/add", bytes.NewReader(bodyBytes))
+	reqAdd.Header.Set("X-GF-Token", "tok")
+	recAdd := httptest.NewRecorder()
+	mux.ServeHTTP(recAdd, reqAdd)
+	if recAdd.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK from /custom/add, got %d: %s", recAdd.Code, recAdd.Body.String())
+	}
+	var addRes CustomAddResult
+	_ = json.Unmarshal(recAdd.Body.Bytes(), &addRes)
+	if !addRes.OK || addRes.AddedCount != 1 || addRes.WorkingCount != 1 || addRes.BestNode != "MyCustomFast" {
+		t.Fatalf("unexpected CustomAddResult: %+v", addRes)
+	}
+
+	customList, _ := pool.ListCustomConfigs()
+	if len(customList) != 1 || !customList[0].Active {
+		t.Fatalf("expected 1 active custom config, got %+v", customList)
+	}
+
+	delBody, _ := json.Marshal(map[string]any{"id": customList[0].ID})
+	reqDel := httptest.NewRequest(http.MethodPost, "/custom/delete", bytes.NewReader(delBody))
+	reqDel.Header.Set("X-GF-Token", "tok")
+	recDel := httptest.NewRecorder()
+	mux.ServeHTTP(recDel, reqDel)
+	if recDel.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK from /custom/delete")
+	}
+	afterDel, _ := pool.ListCustomConfigs()
+	if len(afterDel) != 0 {
+		t.Fatalf("expected custom config deleted, got %d", len(afterDel))
 	}
 }
 

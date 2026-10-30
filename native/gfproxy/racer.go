@@ -203,20 +203,23 @@ func (cr *ConnectionRacer) ConnectAndVerify(
 		return conn, nil
 	}
 
-	// Custom share-link proxy override in NodePool
+	// Custom share-link proxy override in NodePool: verify ServerHello when initialPayload is present,
+	// and fall back cleanly to verified multi-source pool if the custom node fails or drops!
 	if customURI := cr.pool.GetCustomURI(); customURI != "" && !isDomesticOrLocalHost(host) {
-		nodes := cr.pool.PickNodes(ctx, 1, 0)
+		nodes := cr.pool.PickNodes(ctx, 2, 0)
 		if len(nodes) > 0 {
-			conn, err := DialOutboundNode(ctx, cr.router.doh, nodes[0], host, port)
-			if err == nil {
-				if len(initialPayload) > 0 {
-					if _, wErr := conn.Write(initialPayload); wErr != nil {
-						_ = conn.Close()
-						return nil, wErr
-					}
+			if len(initialPayload) > 0 {
+				sp := legSpec{kind: MethodTunnel, delay: 0, node: &nodes[0]}
+				if conn, rttMs, err := cr.runSingleLeg(ctx, cfg, sp, host, port, initialPayload); err == nil && conn != nil {
+					cr.pool.RecordSuccess(nodes[0].ID, rttMs)
+					cr.TunnelWins.Add(1)
+					return conn, nil
 				}
-				cr.TunnelWins.Add(1)
-				return conn, nil
+			} else {
+				if conn, err := DialOutboundNode(ctx, cr.router.doh, nodes[0], host, port); err == nil {
+					cr.TunnelWins.Add(1)
+					return conn, nil
+				}
 			}
 		}
 	}

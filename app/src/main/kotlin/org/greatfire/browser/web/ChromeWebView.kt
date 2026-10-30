@@ -5,21 +5,22 @@ import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
-import android.graphics.Rect
 import android.os.Build
 import android.os.Handler
 import android.os.Looper
 import android.util.AttributeSet
-import androidx.annotation.RequiresApi
 import android.view.ActionMode
 import android.view.HapticFeedbackConstants
 import android.view.Menu
 import android.view.MenuItem
 import android.view.MotionEvent
-import android.view.View
+import android.webkit.JavascriptInterface
 import android.webkit.WebView
 import android.widget.Toast
+import androidx.annotation.Keep
+import androidx.annotation.RequiresApi
 import org.json.JSONObject
+import java.util.Locale
 import java.util.concurrent.atomic.AtomicBoolean
 
 data class WebContextMenuPayload(
@@ -27,19 +28,15 @@ data class WebContextMenuPayload(
     val linkText: String = "",
     val imageUrl: String = "",
     val imageAlt: String = "",
+    val mediaUrl: String = "",
     val hitType: Int = WebView.HitTestResult.UNKNOWN_TYPE
 ) {
     val hasLink: Boolean get() = linkUrl.isNotBlank()
     val hasImage: Boolean get() = imageUrl.isNotBlank()
+    val hasMedia: Boolean get() = mediaUrl.isNotBlank()
 }
 
-/**
- * Authentic Chrome-parity WebView supporting:
- * 1. Reliable Long-Press Context Menu on ALL links (<a>, nested SPA cards, mailto:, tel:),
- *    linked images (<a><img></a>), and standalone images (<img>).
- * 2. Native Android Floating Text Selection ActionMode (Copy, Cut, Paste, Select All, Share)
- *    enhanced with Chrome's "جستجو در وب" (Web Search), "کپی سریع", & "اشتراک‌گذاری" actions.
- */
+@SuppressLint("AddJavascriptInterface")
 class ChromeWebView @JvmOverloads constructor(
     context: Context,
     attrs: AttributeSet? = null
@@ -53,6 +50,8 @@ class ChromeWebView @JvmOverloads constructor(
     var onWebSearchSelectedText: ((String) -> Unit)? = null
     var onTranslateSelectedText: ((String) -> Unit)? = null
     var onAnyTouchDown: (() -> Unit)? = null
+    var onBlobBase64Fetched: ((dataUrl: String, fileName: String, mime: String) -> Unit)? = null
+    var onBlobFetchFailed: ((String) -> Unit)? = null
 
     @Volatile
     private var probedHref: String = ""
@@ -66,7 +65,33 @@ class ChromeWebView @JvmOverloads constructor(
     @Volatile
     private var probedImgAlt: String = ""
 
+    @Volatile
+    private var probedMediaSrc: String = ""
+
     private val mainHandler = Handler(Looper.getMainLooper())
+
+    @Keep
+    private inner class BlobDownloadJsBridge {
+        @JavascriptInterface
+        fun onBlobData(dataUrl: String?, fileName: String?, mime: String?) {
+            if (!dataUrl.isNullOrBlank()) {
+                mainHandler.post {
+                    onBlobBase64Fetched?.invoke(dataUrl, fileName.orEmpty(), mime.orEmpty())
+                }
+            } else {
+                mainHandler.post {
+                    onBlobFetchFailed?.invoke("فایل blob خالی بود")
+                }
+            }
+        }
+
+        @JavascriptInterface
+        fun onBlobError(err: String?) {
+            mainHandler.post {
+                onBlobFetchFailed?.invoke(err.orEmpty().ifBlank { "خطا در خواندن فایل blob" })
+            }
+        }
+    }
 
     init {
         isFocusable = true
@@ -75,9 +100,47 @@ class ChromeWebView @JvmOverloads constructor(
         isLongClickable = true
         isHapticFeedbackEnabled = true
 
+        runCatching {
+            addJavascriptInterface(BlobDownloadJsBridge(), "DrBlobBridge")
+        }
+
         setOnLongClickListener {
             handleLongPress()
         }
+    }
+
+    fun downloadBlobUrl(blobUrl: String, suggestedName: String, mimeHint: String) {
+        val safeUrl = JSONObject.quote(blobUrl)
+        val safeName = JSONObject.quote(suggestedName)
+        val safeMime = JSONObject.quote(mimeHint)
+        val js = """
+            (function(u, fname, mhint) {
+                try {
+                    fetch(u).then(function(r) { return r.blob(); }).then(function(b) {
+                        var reader = new FileReader();
+                        reader.onloadend = function() {
+                            DrBlobBridge.onBlobData(reader.result || '', fname, b.type || mhint || '');
+                        };
+                        reader.onerror = function() {
+                            DrBlobBridge.onBlobError('خطا در تبدیل فایل');
+                        };
+                        reader.readAsDataURL(b);
+                    }).catch(function(e) {
+                        DrBlobBridge.onBlobError(String(e));
+                    });
+                } catch (err) {
+                    DrBlobBridge.onBlobError(String(err));
+                }
+            })($safeUrl, $safeName, $safeMime);
+        """.trimIndent()
+        evaluateJavascript(js, null)
+    }
+
+    fun stopAllMediaPlayback() {
+        evaluateJavascript(
+            "(function(){try{document.querySelectorAll('video,audio').forEach(function(m){m.pause();m.src='';});}catch(_){}})();",
+            null
+        )
     }
 
     @SuppressLint("ClickableViewAccessibility")
@@ -97,15 +160,19 @@ class ChromeWebView @JvmOverloads constructor(
         probedLinkText = ""
         probedImgSrc = ""
         probedImgAlt = ""
+        probedMediaSrc = ""
 
-        @Suppress("DEPRECATION")
-        val densityScale = if (scale > 0f) scale else resources.displayMetrics.density
-        val cssX = (rawX / densityScale).toInt()
-        val cssY = (rawY / densityScale).toInt()
+        val vw = width.coerceAtLeast(1)
+        val vh = height.coerceAtLeast(1)
+        val ratioX = String.format(Locale.US, "%.5f", (rawX / vw).coerceIn(0f, 1f))
+        val ratioY = String.format(Locale.US, "%.5f", (rawY / vh).coerceIn(0f, 1f))
 
+        // Viewport-ratio calculation inside JS guarantees 100% accuracy across pinch-zoom AND Desktop Mode!
         val js = """
-            (function(x, y) {
+            (function(rx, ry) {
                 try {
+                    var x = Math.round(rx * (window.innerWidth || document.documentElement.clientWidth || 1));
+                    var y = Math.round(ry * (window.innerHeight || document.documentElement.clientHeight || 1));
                     var el = document.elementFromPoint(x, y);
                     if (!el) return '';
                     var tag = (el.tagName || '').toUpperCase();
@@ -114,16 +181,25 @@ class ChromeWebView @JvmOverloads constructor(
                     }
                     var a = el.closest ? el.closest('a[href]') : null;
                     var img = (tag === 'IMG') ? el : (a ? a.querySelector('img') : null);
+                    var media = (tag === 'VIDEO' || tag === 'AUDIO') ? el : (el.closest ? el.closest('video,audio') : null);
                     var href = a ? (a.href || '') : '';
                     var txt = a ? ((a.innerText || a.textContent || a.title || '').replace(/\s+/g, ' ').trim().slice(0, 300)) : '';
                     var src = img ? (img.currentSrc || img.src || '') : '';
                     var alt = img ? ((img.alt || '').trim().slice(0, 200)) : '';
-                    if (!href && !src) return '';
-                    return JSON.stringify({ href: href, text: txt, src: src, alt: alt });
+                    var msrc = '';
+                    if (media) {
+                        msrc = media.currentSrc || media.src || '';
+                        if (!msrc) {
+                            var sEl = media.querySelector('source[src]');
+                            if (sEl) msrc = sEl.src || '';
+                        }
+                    }
+                    if (!href && !src && !msrc) return '';
+                    return JSON.stringify({ href: href, text: txt, src: src, alt: alt, media: msrc });
                 } catch (e) {
                     return '';
                 }
-            })($cssX, $cssY);
+            })($ratioX, $ratioY);
         """.trimIndent()
 
         evaluateJavascript(js) { rawResult ->
@@ -136,6 +212,7 @@ class ChromeWebView @JvmOverloads constructor(
                         probedLinkText = obj.optString("text", "")
                         probedImgSrc = obj.optString("src", "")
                         probedImgAlt = obj.optString("alt", "")
+                        probedMediaSrc = obj.optString("media", "")
                     }
                 }
             }
@@ -147,7 +224,6 @@ class ChromeWebView @JvmOverloads constructor(
         val type = hit?.type ?: HitTestResult.UNKNOWN_TYPE
         val extra = hit?.extra.orEmpty()
 
-        // Never hijack long-press inside <input> or <textarea> so Paste / Select All works natively!
         if (type == HitTestResult.EDIT_TEXT_TYPE) {
             return false
         }
@@ -158,10 +234,9 @@ class ChromeWebView @JvmOverloads constructor(
             type == HitTestResult.EMAIL_TYPE ||
             type == HitTestResult.PHONE_TYPE
 
-        val hasProbedLinkOrImage = probedHref.isNotBlank() || probedImgSrc.isNotBlank()
+        val hasProbedTarget = probedHref.isNotBlank() || probedImgSrc.isNotBlank() || probedMediaSrc.isNotBlank()
 
-        if (!isNativeLinkOrImage && !hasProbedLinkOrImage) {
-            // Plain text on page -> return false so Chromium activates blue selection handles + floating Copy/Share toolbar!
+        if (!isNativeLinkOrImage && !hasProbedTarget) {
             return false
         }
 
@@ -194,9 +269,10 @@ class ChromeWebView @JvmOverloads constructor(
                 linkText = finalText,
                 imageUrl = finalImage,
                 imageAlt = probedImgAlt,
+                mediaUrl = probedMediaSrc,
                 hitType = type
             )
-            if (payload.hasLink || payload.hasImage) {
+            if (payload.hasLink || payload.hasImage || payload.hasMedia) {
                 onContextMenuRequested?.invoke(payload)
             }
         }
@@ -211,7 +287,6 @@ class ChromeWebView @JvmOverloads constructor(
             true
         }
         requestFocusNodeHref(hrefHandler.obtainMessage())
-        // Fallback in case Chromium AwContents skips sending Message on standalone <img> or SPA card links
         mainHandler.postDelayed({ emitContextMenu("", "", "") }, 45L)
         return true
     }
@@ -268,7 +343,6 @@ class ChromeWebView @JvmOverloads constructor(
                 .setShowAsAction(MenuItem.SHOW_AS_ACTION_IF_ROOM)
         }
         if (menu.findItem(MENU_ID_SHARE_TEXT) == null) {
-            // Add explicit Persian share option in case system OEM omits Share
             var hasNativeShare = false
             for (i in 0 until menu.size()) {
                 val title = menu.getItem(i)?.title?.toString()?.lowercase().orEmpty()
@@ -337,6 +411,49 @@ class ChromeWebView @JvmOverloads constructor(
         Toast.makeText(context, toastMessage, Toast.LENGTH_SHORT).show()
     }
 
+    @RequiresApi(Build.VERSION_CODES.M)
+    private object Api23ActionModeHelper {
+        fun wrap(
+            delegate: ActionMode.Callback,
+            onActiveChanged: (Boolean) -> Unit,
+            onAugmentMenu: (Menu) -> Unit,
+            onItemClicked: (ActionMode, MenuItem) -> Boolean
+        ): ActionMode.Callback2 {
+            return object : ActionMode.Callback2() {
+                override fun onCreateActionMode(mode: ActionMode, menu: Menu): Boolean {
+                    onActiveChanged(true)
+                    val created = delegate.onCreateActionMode(mode, menu)
+                    onAugmentMenu(menu)
+                    return created
+                }
+
+                override fun onPrepareActionMode(mode: ActionMode, menu: Menu): Boolean {
+                    val res = delegate.onPrepareActionMode(mode, menu)
+                    onAugmentMenu(menu)
+                    return res
+                }
+
+                override fun onActionItemClicked(mode: ActionMode, item: MenuItem): Boolean {
+                    if (onItemClicked(mode, item)) return true
+                    return delegate.onActionItemClicked(mode, item)
+                }
+
+                override fun onDestroyActionMode(mode: ActionMode) {
+                    onActiveChanged(false)
+                    delegate.onDestroyActionMode(mode)
+                }
+
+                override fun onGetContentRect(mode: ActionMode?, view: android.view.View?, outRect: android.graphics.Rect?) {
+                    if (delegate is ActionMode.Callback2) {
+                        delegate.onGetContentRect(mode, view, outRect)
+                    } else {
+                        super.onGetContentRect(mode, view, outRect)
+                    }
+                }
+            }
+        }
+    }
+
     companion object {
         private const val MENU_ID_WEB_SEARCH = 0x70F101
         private const val MENU_ID_SHARE_TEXT = 0x70F102
@@ -348,49 +465,6 @@ class ChromeWebView @JvmOverloads constructor(
                 org.json.JSONTokener(raw).nextValue()?.toString().orEmpty()
             }.getOrElse {
                 raw.removeSurrounding("\"")
-            }
-        }
-    }
-}
-
-@RequiresApi(Build.VERSION_CODES.M)
-private object Api23ActionModeHelper {
-    fun wrap(
-        delegate: ActionMode.Callback,
-        onActiveChanged: (Boolean) -> Unit,
-        onAugmentMenu: (Menu) -> Unit,
-        onItemClicked: (ActionMode, MenuItem) -> Boolean
-    ): ActionMode.Callback {
-        return object : ActionMode.Callback2() {
-            override fun onCreateActionMode(mode: ActionMode, menu: Menu): Boolean {
-                onActiveChanged(true)
-                val created = delegate.onCreateActionMode(mode, menu)
-                onAugmentMenu(menu)
-                return created
-            }
-
-            override fun onPrepareActionMode(mode: ActionMode, menu: Menu): Boolean {
-                val res = delegate.onPrepareActionMode(mode, menu)
-                onAugmentMenu(menu)
-                return res
-            }
-
-            override fun onActionItemClicked(mode: ActionMode, item: MenuItem): Boolean {
-                if (onItemClicked(mode, item)) return true
-                return delegate.onActionItemClicked(mode, item)
-            }
-
-            override fun onDestroyActionMode(mode: ActionMode) {
-                onActiveChanged(false)
-                delegate.onDestroyActionMode(mode)
-            }
-
-            override fun onGetContentRect(mode: ActionMode?, view: View?, outRect: Rect?) {
-                if (delegate is ActionMode.Callback2) {
-                    delegate.onGetContentRect(mode, view, outRect)
-                } else {
-                    super.onGetContentRect(mode, view, outRect)
-                }
             }
         }
     }
