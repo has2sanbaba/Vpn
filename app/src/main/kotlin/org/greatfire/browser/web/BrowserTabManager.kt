@@ -3,6 +3,8 @@ package org.greatfire.browser.web
 import android.annotation.SuppressLint
 import android.app.Activity
 import android.content.Context
+import android.graphics.Bitmap
+import android.graphics.Canvas
 import android.net.Uri
 import android.os.Build
 import android.os.Message
@@ -20,11 +22,11 @@ import android.webkit.WebView
 import android.widget.EditText
 import android.widget.LinearLayout
 import androidx.appcompat.app.AlertDialog
-import androidx.webkit.WebViewCompat
-import androidx.webkit.WebViewFeature
 import org.greatfire.browser.data.BrowserDataStore
 import org.greatfire.browser.data.SavedSessionTab
+import org.greatfire.browser.media.VideoStreamSniffer
 import org.greatfire.browser.vpn.TunnelManager
+import org.json.JSONObject
 import java.util.UUID
 
 data class BrowserTab(
@@ -33,8 +35,10 @@ data class BrowserTab(
     var title: String = "تب جدید",
     var currentUrl: String = BrowserTabManager.HOME_URL,
     var desktopMode: Boolean = false,
+    var pinned: Boolean = false,
     var isLoading: Boolean = false,
     var needsRestoreLoad: Boolean = false,
+    var previewBitmap: Bitmap? = null,
     val webView: ChromeWebView
 )
 
@@ -64,12 +68,13 @@ class BrowserTabManager(
     val activeTab: BrowserTab?
         get() = _tabs.getOrNull(activeIndex)
 
-    @SuppressLint("SetJavaScriptEnabled", "RequiresFeature")
+    @SuppressLint("SetJavaScriptEnabled")
     fun createTab(
         initialUrl: String = HOME_URL,
         incognito: Boolean = false,
         selectImmediately: Boolean = true,
-        initialDesktopMode: Boolean = dataStore.defaultDesktopMode
+        initialDesktopMode: Boolean = dataStore.defaultDesktopMode,
+        initialPinned: Boolean = false
     ): BrowserTab {
         val webView = ChromeWebView(context).apply {
             layoutParams = ViewGroup.LayoutParams(
@@ -111,25 +116,9 @@ class BrowserTabManager(
             settings.cacheMode = WebSettings.LOAD_DEFAULT
         }
 
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            settings.safeBrowsingEnabled = false
-        }
-
         val cookieManager = CookieManager.getInstance()
         cookieManager.setAcceptCookie(!incognito && dataStore.cookiesEnabled)
         cookieManager.setAcceptThirdPartyCookies(webView, false)
-
-        if (tunnelManager.webRtcShieldEnabled &&
-            WebViewFeature.isFeatureSupported(WebViewFeature.DOCUMENT_START_SCRIPT)
-        ) {
-            runCatching {
-                WebViewCompat.addDocumentStartJavaScript(
-                    webView,
-                    EnvoyWebViewClient.WEBRTC_SHIELD_JS,
-                    setOf("*")
-                )
-            }
-        }
 
         lateinit var tabRef: BrowserTab
 
@@ -148,8 +137,27 @@ class BrowserTabManager(
         webView.onBlobBase64Fetched = { dataUrl, fileName, mime ->
             onBlobDataReceived?.invoke(dataUrl, fileName, mime)
         }
+        webView.onIdmMediaDetectedJson = { payloadJson ->
+            runCatching {
+                val obj = JSONObject(payloadJson)
+                val kindHint = obj.optString("kind", "video")
+                val mimeHint = if (kindHint == "audio") "audio/mpeg" else ""
+                VideoStreamSniffer.recordCandidate(
+                    tabId = tabRef.id,
+                    rawUrl = obj.optString("url", ""),
+                    pageUrl = obj.optString("pageUrl", tabRef.currentUrl),
+                    pageTitle = obj.optString("title", tabRef.title),
+                    mimeHint = mimeHint,
+                    width = obj.optInt("width", 0),
+                    height = obj.optInt("height", 0),
+                    durationSec = obj.optInt("duration", 0)
+                )
+            }
+        }
 
         webView.webViewClient = EnvoyWebViewClient(
+            tabIdProvider = { tabRef.id },
+            pageMetaProvider = { tabRef.currentUrl to tabRef.title },
             tunnelManager = tunnelManager,
             onUrlChanged = { _, newUrl ->
                 if (newUrl != "about:blank") {
@@ -160,6 +168,9 @@ class BrowserTabManager(
             },
             onLoadingStateChanged = { _, loading ->
                 tabRef.isLoading = loading
+                if (!loading && tabRef.currentUrl != HOME_URL) {
+                    captureTabPreviewQuietly(tabRef)
+                }
                 onTabStateUpdated()
             },
             onHistoryVisited = { pageTitle, visitedUrl ->
@@ -325,8 +336,13 @@ class BrowserTabManager(
             title = if (incognito) "تب ناشناس" else "تب جدید",
             currentUrl = initialUrl,
             desktopMode = initialDesktopMode,
+            pinned = initialPinned,
             webView = webView
         )
+
+        if (selectImmediately) {
+            activeTab?.let { captureTabPreviewQuietly(it) }
+        }
 
         _tabs.add(tabRef)
         if (selectImmediately || activeIndex !in _tabs.indices) {
@@ -341,8 +357,59 @@ class BrowserTabManager(
         return tabRef
     }
 
+    fun captureActiveTabPreview() {
+        activeTab?.let { captureTabPreviewQuietly(it) }
+    }
+
+    private fun captureTabPreviewQuietly(tab: BrowserTab) {
+        if (tab.currentUrl == HOME_URL) {
+            tab.previewBitmap = null
+            return
+        }
+        val wv = tab.webView
+        val w = wv.width
+        val h = wv.height
+        if (w <= 40 || h <= 40) return
+        runCatching {
+            val targetW = 280
+            val targetH = ((targetW.toFloat() * h.toFloat() / w.toFloat()).toInt()).coerceIn(200, 380)
+            val bmp = Bitmap.createBitmap(targetW, targetH, Bitmap.Config.RGB_565)
+            val canvas = Canvas(bmp)
+            val scale = targetW.toFloat() / w.toFloat()
+            canvas.scale(scale, scale)
+            canvas.translate(-wv.scrollX.toFloat(), -wv.scrollY.toFloat())
+            wv.draw(canvas)
+            tab.previewBitmap = bmp
+        }
+    }
+
+    fun togglePinTab(tab: BrowserTab): Boolean {
+        tab.pinned = !tab.pinned
+        val currentActiveId = activeTab?.id
+        // Keep pinned tabs grouped at the front just like Chrome Android
+        val sorted = _tabs.sortedByDescending { it.pinned }
+        _tabs.clear()
+        _tabs.addAll(sorted)
+        if (currentActiveId != null) {
+            activeIndex = _tabs.indexOfFirst { it.id == currentActiveId }.coerceAtLeast(0)
+        }
+        persistSessionQuietly()
+        onTabStateUpdated()
+        return tab.pinned
+    }
+
+    fun duplicateTab(source: BrowserTab): BrowserTab {
+        return createTab(
+            initialUrl = source.currentUrl,
+            incognito = source.incognito,
+            selectImmediately = true,
+            initialDesktopMode = source.desktopMode
+        )
+    }
+
     fun selectTab(index: Int) {
         if (index in _tabs.indices) {
+            activeTab?.let { captureTabPreviewQuietly(it) }
             activeIndex = index
             activeTab?.let { ensureTabLoaded(it) }
             persistSessionQuietly()
@@ -360,6 +427,8 @@ class BrowserTabManager(
     fun closeTab(index: Int): Pair<String, String>? {
         if (index !in _tabs.indices) return null
         val removed = _tabs.removeAt(index)
+        VideoStreamSniffer.clearTab(removed.id)
+        removed.previewBitmap = null
         val closedInfo = if (!removed.incognito && removed.currentUrl != HOME_URL) {
             dataStore.pushRecentlyClosedTab(removed.title, removed.currentUrl)
             removed.title to removed.currentUrl
@@ -383,13 +452,13 @@ class BrowserTabManager(
         return closedInfo
     }
 
-    fun closeAllTabs(incognitoOnly: Boolean) {
-        val toClose = if (incognitoOnly) {
-            _tabs.filter { it.incognito }
-        } else {
-            _tabs.toList()
+    fun closeAllTabs(incognitoOnly: Boolean, keepPinned: Boolean = true) {
+        val toClose = _tabs.filter { t ->
+            (if (incognitoOnly) t.incognito else true) && (!keepPinned || !t.pinned)
         }
         for (t in toClose) {
+            VideoStreamSniffer.clearTab(t.id)
+            t.previewBitmap = null
             if (!t.incognito && t.currentUrl != HOME_URL) {
                 dataStore.pushRecentlyClosedTab(t.title, t.currentUrl)
             }
@@ -448,7 +517,8 @@ class BrowserTabManager(
                 initialUrl = HOME_URL,
                 incognito = false,
                 selectImmediately = false,
-                initialDesktopMode = item.desktopMode
+                initialDesktopMode = item.desktopMode,
+                initialPinned = item.pinned
             )
             t.title = item.title
             t.currentUrl = item.url
@@ -460,6 +530,8 @@ class BrowserTabManager(
     }
 
     fun navigateTabToHome(tab: BrowserTab) {
+        VideoStreamSniffer.clearTab(tab.id)
+        tab.previewBitmap = null
         tab.isLoading = false
         tab.needsRestoreLoad = false
         tab.currentUrl = HOME_URL
@@ -506,7 +578,11 @@ class BrowserTabManager(
     }
 
     fun panicWipeAll() {
-        _tabs.forEach { destroyWebViewCleanly(it.webView) }
+        _tabs.forEach {
+            VideoStreamSniffer.clearTab(it.id)
+            it.previewBitmap = null
+            destroyWebViewCleanly(it.webView)
+        }
         _tabs.clear()
         dataStore.clearHistorySince(0L)
         dataStore.clearRecentlyClosedTabs()
@@ -523,7 +599,12 @@ class BrowserTabManager(
     fun persistSessionQuietly() {
         runCatching {
             val nonIncognito = _tabs.filter { !it.incognito }.map {
-                SavedSessionTab(title = it.title, url = it.currentUrl, desktopMode = it.desktopMode)
+                SavedSessionTab(
+                    title = it.title,
+                    url = it.currentUrl,
+                    desktopMode = it.desktopMode,
+                    pinned = it.pinned
+                )
             }
             val currentTab = activeTab
             val savedActive = if (currentTab != null && !currentTab.incognito) {
@@ -537,7 +618,11 @@ class BrowserTabManager(
 
     fun destroyAll() {
         persistSessionQuietly()
-        _tabs.forEach { destroyWebViewCleanly(it.webView) }
+        _tabs.forEach {
+            VideoStreamSniffer.clearTab(it.id)
+            it.previewBitmap = null
+            destroyWebViewCleanly(it.webView)
+        }
         _tabs.clear()
     }
 
@@ -553,6 +638,6 @@ class BrowserTabManager(
     companion object {
         const val HOME_URL = "gf://home"
         private const val DESKTOP_UA =
-            "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36"
+            "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/134.0.0.0 Safari/537.36"
     }
 }

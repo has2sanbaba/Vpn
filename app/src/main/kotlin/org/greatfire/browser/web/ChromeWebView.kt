@@ -52,6 +52,7 @@ class ChromeWebView @JvmOverloads constructor(
     var onAnyTouchDown: (() -> Unit)? = null
     var onBlobBase64Fetched: ((dataUrl: String, fileName: String, mime: String) -> Unit)? = null
     var onBlobFetchFailed: ((String) -> Unit)? = null
+    var onIdmMediaDetectedJson: ((String) -> Unit)? = null
 
     @Volatile
     private var probedHref: String = ""
@@ -93,6 +94,16 @@ class ChromeWebView @JvmOverloads constructor(
         }
     }
 
+    @Keep
+    private inner class IdmMediaJsBridge {
+        @JavascriptInterface
+        fun onMediaDetected(payloadJson: String?) {
+            if (!payloadJson.isNullOrBlank()) {
+                onIdmMediaDetectedJson?.invoke(payloadJson)
+            }
+        }
+    }
+
     init {
         isFocusable = true
         isFocusableInTouchMode = true
@@ -102,10 +113,44 @@ class ChromeWebView @JvmOverloads constructor(
 
         runCatching {
             addJavascriptInterface(BlobDownloadJsBridge(), "DrBlobBridge")
+            addJavascriptInterface(IdmMediaJsBridge(), "DrIdmBridge")
         }
 
         setOnLongClickListener {
             handleLongPress()
+        }
+    }
+
+    fun triggerIdmMediaRescan() {
+        evaluateJavascript(org.greatfire.browser.media.VideoStreamSniffer.IDM_PAGE_SNIFFER_JS, null)
+    }
+
+    fun extractReadablePageText(onResult: (title: String, content: String) -> Unit) {
+        val js = """
+            (function() {
+                try {
+                    var root = document.querySelector('article, [role="main"], main') || document.body;
+                    if (!root) return JSON.stringify({ title: document.title || '', text: '' });
+                    var blocks = root.querySelectorAll('h1, h2, h3, p, li, blockquote');
+                    var lines = [];
+                    for (var i = 0; i < blocks.length && lines.length < 220; i++) {
+                        var t = (blocks[i].innerText || '').replace(/\s+/g, ' ').trim();
+                        if (t.length >= 25) lines.push(t);
+                    }
+                    var out = lines.length >= 2 ? lines.join('\n\n') : ((root.innerText || '').replace(/\n{3,}/g, '\n\n').trim());
+                    return JSON.stringify({ title: document.title || '', text: out.slice(0, 28000) });
+                } catch (e) {
+                    return JSON.stringify({ title: document.title || '', text: '' });
+                }
+            })();
+        """.trimIndent()
+        evaluateJavascript(js) { raw ->
+            val decoded = decodeEvaluateJsString(raw)
+            val parsed = runCatching { JSONObject(decoded) }.getOrNull()
+            onResult(
+                parsed?.optString("title").orEmpty(),
+                parsed?.optString("text").orEmpty()
+            )
         }
     }
 

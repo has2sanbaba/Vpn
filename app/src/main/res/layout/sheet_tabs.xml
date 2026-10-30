@@ -5,14 +5,19 @@
     android:layout_height="wrap_content"
     android:background="@color/gf_bg_surface"
     android:orientation="vertical"
-    android:padding="16dp">
+    android:paddingStart="12dp"
+    android:paddingTop="14dp"
+    android:paddingEnd="12dp"
+    android:paddingBottom="16dp">
 
-    <!-- Authentic Chrome Tab Switcher Top Action Bar -->
+    <!-- Authentic 2026 Google Chrome Grid Tab Switcher Top Bar -->
     <LinearLayout
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
         android:gravity="center_vertical"
-        android:orientation="horizontal">
+        android:orientation="horizontal"
+        android:paddingStart="4dp"
+        android:paddingEnd="4dp">
 
         <com.google.android.material.button.MaterialButton
             android:id="@+id/btnNewTab"
@@ -44,6 +49,16 @@
             android:layout_weight="1" />
 
         <com.google.android.material.button.MaterialButton
+            android:id="@+id/btnFilterIncognito"
+            style="@style/Widget.MaterialComponents.Button.TextButton"
+            android:layout_width="wrap_content"
+            android:layout_height="38dp"
+            android:minWidth="0dp"
+            android:text="همه تب‌ها"
+            android:textColor="@color/gf_text_secondary"
+            android:textSize="11.5sp" />
+
+        <com.google.android.material.button.MaterialButton
             android:id="@+id/btnCloseAllTabs"
             style="@style/Widget.MaterialComponents.Button.TextButton"
             android:layout_width="wrap_content"
@@ -54,10 +69,21 @@
             android:textSize="12sp" />
     </LinearLayout>
 
+    <TextView
+        android:id="@+id/tvTabsHint"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:paddingStart="6dp"
+        android:paddingTop="4dp"
+        android:paddingEnd="6dp"
+        android:text="برای پین کردن، اشتراک‌گذاری یا تکثیر هر تب، روی کارت آن نگه دارید"
+        android:textColor="@color/gf_text_secondary"
+        android:textSize="11sp" />
+
     <androidx.recyclerview.widget.RecyclerView
         android:id="@+id/rvTabs"
         android:layout_width="match_parent"
-        android:layout_height="340dp"
-        android:layout_marginTop="12dp" />
+        android:layout_height="420dp"
+        android:layout_marginTop="8dp" />
 
 </LinearLayout>

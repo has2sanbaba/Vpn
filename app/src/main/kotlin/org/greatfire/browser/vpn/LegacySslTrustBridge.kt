@@ -1,29 +1,23 @@
 package org.greatfire.browser.vpn
 
 import android.content.Context
-import android.net.http.SslCertificate
-import android.net.http.SslError
 import android.os.Build
 import android.util.Base64
 import android.util.Log
 import org.greatfire.browser.R
-import java.io.ByteArrayInputStream
 import java.io.File
 import java.security.KeyStore
 import java.security.cert.CertificateFactory
 import java.security.cert.X509Certificate
-import javax.net.ssl.HttpsURLConnection
 import javax.net.ssl.SSLContext
 import javax.net.ssl.SSLSocketFactory
 import javax.net.ssl.TrustManagerFactory
 import javax.net.ssl.X509TrustManager
 
 /**
- * 1. Provides genuine cryptographic verification of Let's Encrypt (ISRG Root X1 & X2) certificates
- *    on older Android phones (Android 5.0 Lollipop - Android 7.0 Nougat, API 21..24).
- * 2. Exports a unified PEM CA bundle (`cacert.pem`) combining AndroidCAStore + ISRG Root X1/X2
- *    so standalone Go daemons (`libgfproxy.so`, `libwarpplus.so`, `libsingbox.so`) have full X.509
- *    root trust across Android 5.0 through Android 16+ (including `/apex/com.android.conscrypt`).
+ * Exports a verified PEM CA bundle (`cacert.pem`) combining AndroidCAStore + ISRG Root X1/X2
+ * so our in-process Go engine (`libgfproxy.so`) and legacy Android 5.0–7.0 OkHttp clients
+ * perform genuine cryptographic X.509 validation across Android 5.0 through Android 16+.
  */
 object LegacySslTrustBridge {
     private const val TAG = "LegacySslTrustBridge"
@@ -43,7 +37,6 @@ object LegacySslTrustBridge {
     fun initialize(context: Context) {
         try {
             val pemFile = File(context.filesDir, "cacert.pem")
-            // Fast path on Android 7.1+ when cacert.pem is already exported (< 0.2ms startup!)
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N_MR1 &&
                 pemFile.exists() && pemFile.length() >= 8192L
             ) {
@@ -68,7 +61,6 @@ object LegacySslTrustBridge {
                 setCertificateEntry("isrg_root_x1", isrgX1)
                 setCertificateEntry("isrg_root_x2", isrgX2)
 
-                // Include all existing Android system CA certificates
                 val systemKs = KeyStore.getInstance("AndroidCAStore")
                 systemKs.load(null, null)
                 val aliases = systemKs.aliases()
@@ -112,13 +104,6 @@ object LegacySslTrustBridge {
         return caBundlePemPath
     }
 
-    fun applyGoTlsEnv(context: Context, env: MutableMap<String, String>) {
-        ensureCaBundlePath(context)?.let { pemPath ->
-            env["SSL_CERT_FILE"] = pemPath
-        }
-        env["SSL_CERT_DIR"] = "/apex/com.android.conscrypt/cacerts:/system/etc/security/cacerts"
-    }
-
     private fun appendPemCert(sb: StringBuilder, derBytes: ByteArray) {
         val b64 = Base64.encodeToString(derBytes, Base64.NO_WRAP)
         sb.append("-----BEGIN CERTIFICATE-----\n")
@@ -129,54 +114,5 @@ object LegacySslTrustBridge {
             i = end
         }
         sb.append("-----END CERTIFICATE-----\n")
-    }
-
-    /**
-     * Used ONLY on legacy Android < 7.1.1 (API < 25) when WebView reports SSL_UNTRUSTED due to
-     * missing ISRG Root X1. Returns true ONLY if the leaf certificate passes full cryptographic
-     * trust validation AND RFC 2818 hostname verification.
-     */
-    fun verifyLegacyWebViewSslError(error: SslError, expectedHost: String?): Boolean {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N_MR1) return false
-        if (error.primaryError != SslError.SSL_UNTRUSTED) return false
-        val host = expectedHost?.takeIf { it.isNotBlank() } ?: return false
-        val tm = trustManager ?: return false
-
-        return try {
-            val bundle = SslCertificate.saveState(error.certificate)
-            val derBytes = bundle.getByteArray("x509-certificate") ?: return false
-            val cf = CertificateFactory.getInstance("X.509")
-            val x509 = cf.generateCertificate(ByteArrayInputStream(derBytes)) as X509Certificate
-            x509.checkValidity()
-            tm.checkServerTrusted(arrayOf(x509), "ECDHE_RSA")
-            HttpsURLConnection.getDefaultHostnameVerifier().verify(host, FakeCertSession(x509))
-        } catch (_: Throwable) {
-            false
-        }
-    }
-
-    private class FakeCertSession(private val leaf: X509Certificate) : javax.net.ssl.SSLSession {
-        override fun getPeerCertificates() = arrayOf<java.security.cert.Certificate>(leaf)
-        override fun getId() = ByteArray(0)
-        override fun getSessionContext() = null
-        override fun getCreationTime() = 0L
-        override fun getLastAccessedTime() = 0L
-        override fun invalidate() {}
-        override fun isValid() = true
-        override fun putValue(name: String?, value: Any?) {}
-        override fun getValue(name: String?) = null
-        override fun removeValue(name: String?) {}
-        override fun getValueNames() = emptyArray<String>()
-        override fun getLocalCertificates() = null
-        @Suppress("OVERRIDE_DEPRECATION")
-        override fun getPeerCertificateChain() = emptyArray<javax.security.cert.X509Certificate>()
-        override fun getPeerPrincipal() = leaf.subjectX500Principal
-        override fun getLocalPrincipal() = null
-        override fun getCipherSuite() = "TLS_AES_128_GCM_SHA256"
-        override fun getProtocol() = "TLSv1.3"
-        override fun getPeerHost() = ""
-        override fun getPeerPort() = 443
-        override fun getPacketBufferSize() = 16384
-        override fun getApplicationBufferSize() = 16384
     }
 }

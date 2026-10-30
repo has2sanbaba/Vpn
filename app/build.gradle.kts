@@ -17,12 +17,12 @@ android {
     compileSdk = 35
 
     defaultConfig {
-        applicationId = "org.greatfire.envoy.browser"
+        applicationId = "io.github.has2sanbaba.drbrowser"
         // Android 5.0 Lollipop (API 21) -> Android 15/16+ (API 35+)
         minSdk = 21
         targetSdk = 35
-        versionCode = 500
-        versionName = "5.0.0"
+        versionCode = 600
+        versionName = "6.0.0"
 
         multiDexEnabled = true
         vectorDrawables.useSupportLibrary = true
@@ -96,8 +96,6 @@ android {
 
     packaging {
         jniLibs {
-            // Extracts single lightweight libgfproxy.so to nativeLibraryDir with exec permission on API 21..35+
-            useLegacyPackaging = true
             keepDebugSymbols += setOf("**/libgfproxy.so")
         }
         resources {

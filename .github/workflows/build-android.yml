@@ -1,4 +1,4 @@
-name: Build Dr Browser v5.0 Multi-Source Anti-Censorship Chrome Browser
+name: Build Dr Browser v6.0 Chrome Edition + IDM Video Grabber (Play Protect Clean)
 
 on:
   push:
@@ -23,7 +23,7 @@ permissions:
 
 jobs:
   build-android:
-    name: Build & Verify Dr Browser v5.0 (API 21–35+, All 4 ABIs)
+    name: Build & Verify Dr Browser v6.0 (API 21–35+, All 4 ABIs, Play Protect Clean)
     runs-on: ubuntu-latest
     timeout-minutes: 30
 
@@ -48,13 +48,12 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/go/pkg/mod
-          key: go-mod-drbrowser-v5-${{ hashFiles('native/gfproxy/go.mod') }}
+          key: go-mod-drbrowser-v6-${{ hashFiles('native/gfproxy/go.mod') }}
           restore-keys: |
+            go-mod-drbrowser-v6-
             go-mod-drbrowser-v5-
-            go-mod-drbrowser-v4-
-            go-mod-freebrowser-v3-
 
-      - name: Resolve Go Modules & Run Multi-Source + VMess AEAD + Custom Config Engine Tests
+      - name: Resolve Go Modules & Run Multi-Source + JNI Control Engine Tests
         working-directory: native/gfproxy
         run: |
           set +e
@@ -91,14 +90,14 @@ jobs:
           echo "ANDROID_NDK_HOME=$FOUND_NDK" >> "$GITHUB_ENV"
           echo "Using ANDROID_NDK_HOME=$FOUND_NDK"
 
-      - name: Cache Compiled 4-ABI libgfproxy.so
+      - name: Cache Compiled 4-ABI JNI Shared Library (libgfproxy.so)
         id: cache-jni
         uses: actions/cache@v4
         with:
           path: app/src/main/jniLibs
-          key: jnilibs-drbrowser-v5-${{ hashFiles('scripts/build-gfproxy-android.sh', 'native/gfproxy/**') }}
+          key: jnilibs-cshared-drbrowser-v6-${{ hashFiles('scripts/build-gfproxy-android.sh', 'native/gfproxy/**') }}
 
-      - name: Cross-Compile Lightweight libgfproxy.so (All 4 ABIs, API 21, 16KB Page Aligned)
+      - name: Cross-Compile True JNI C-Shared libgfproxy.so (All 4 ABIs, API 21, 16KB Page Aligned)
         if: steps.cache-jni.outputs.cache-hit != 'true'
         run: |
           set +e
@@ -111,6 +110,14 @@ jobs:
             exit "$RC"
           fi
           set -e
+
+      - name: Restore Consistent Developer Release Keystore (Play Protect Identity Continuity)
+        uses: actions/cache@v4
+        with:
+          path: keystore
+          key: drbrowser-release-keystore-v6-consistent
+          restore-keys: |
+            drbrowser-release-keystore-v6-
 
       - name: Prepare V1 + V2 + V3 Release Signing Keystore
         env:
@@ -135,7 +142,7 @@ jobs:
           fi
           set -e
 
-      - name: Verify All 4 CPU Architectures, Lightweight APK Sizes & API 21 Signatures
+      - name: Verify All 4 CPU Architectures, Play Protect Compliance & API 21 Signatures
         run: |
           set -euo pipefail
           SDK_ROOT="${ANDROID_HOME:-/usr/local/lib/android/sdk}"
@@ -145,13 +152,13 @@ jobs:
           REL_DIR="app/build/outputs/apk/release"
           mkdir -p dist
 
-          cp "$REL_DIR/app-universal-release.apk"   "dist/Dr-Browser-v5.0.0-universal-release.apk"
-          cp "$REL_DIR/app-arm64-v8a-release.apk"   "dist/Dr-Browser-v5.0.0-arm64-v8a-release.apk"
-          cp "$REL_DIR/app-armeabi-v7a-release.apk" "dist/Dr-Browser-v5.0.0-armeabi-v7a-release.apk"
-          cp "$REL_DIR/app-x86_64-release.apk"      "dist/Dr-Browser-v5.0.0-x86_64-release.apk"
-          cp "$REL_DIR/app-x86-release.apk"         "dist/Dr-Browser-v5.0.0-x86-release.apk"
+          cp "$REL_DIR/app-universal-release.apk"   "dist/Dr-Browser-v6.0.0-universal-release.apk"
+          cp "$REL_DIR/app-arm64-v8a-release.apk"   "dist/Dr-Browser-v6.0.0-arm64-v8a-release.apk"
+          cp "$REL_DIR/app-armeabi-v7a-release.apk" "dist/Dr-Browser-v6.0.0-armeabi-v7a-release.apk"
+          cp "$REL_DIR/app-x86_64-release.apk"      "dist/Dr-Browser-v6.0.0-x86_64-release.apk"
+          cp "$REL_DIR/app-x86-release.apk"         "dist/Dr-Browser-v6.0.0-x86-release.apk"
 
-          UNIV="dist/Dr-Browser-v5.0.0-universal-release.apk"
+          UNIV="dist/Dr-Browser-v6.0.0-universal-release.apk"
           unzip -l "$UNIV" > zip_list.txt
 
           for abi in armeabi-v7a arm64-v8a x86 x86_64; do
@@ -160,7 +167,7 @@ jobs:
               exit 1
             }
           done
-          echo "Verified lightweight libgfproxy.so across all 4 CPU ABIs inside Universal APK!"
+          echo "Verified JNI C-shared libgfproxy.so across all 4 CPU ABIs inside Universal APK!"
 
           for apk in dist/*.apk; do
             "$APKSIGNER" verify --verbose --min-sdk-version 21 "$apk" > apksigner_out.txt 2>&1 || {
@@ -172,8 +179,13 @@ jobs:
           cat apksigner_out.txt
 
           if [[ -n "$AAPT2" && -x "$AAPT2" ]]; then
-            "$AAPT2" dump badging "$UNIV" > badging.txt || true
-            grep -E "package:|sdkVersion:|targetSdkVersion:|native-code:" badging.txt || true
+            "$AAPT2" dump badging "$UNIV" > badging.txt
+            grep -E "package:|sdkVersion:|targetSdkVersion:|native-code:|uses-permission:" badging.txt || true
+            if grep -Eq "REQUEST_INSTALL_PACKAGES|QUERY_ALL_PACKAGES|BIND_ACCESSIBILITY_SERVICE|SYSTEM_ALERT_WINDOW|READ_SMS|RECEIVE_SMS" badging.txt; then
+              echo "::error title=PlayProtectViolation::Forbidden high-risk permission detected in merged APK manifest!"
+              cat badging.txt
+              exit 1
+            fi
           fi
 
           rm -f zip_list.txt apksigner_out.txt badging.txt
@@ -183,12 +195,11 @@ jobs:
           echo "::notice title=BuiltAPKs::${NOTICE_BODY}"
 
           {
-            echo "## ⚡ Dr Browser v5.0 — 10-Source Anti-Censorship Engine + Perfected Omnibox + Custom Config/Sub Manager + Resumable Tunneled Downloader"
+            echo "## ⚡ Dr Browser v6.0 — Play Protect Clean JNI Architecture + 2026 Google Chrome UI + IDM Video/HLS Downloader"
             echo ""
-            echo "- **10 Independent Proxy Sources + 4 CDN Mirrors:** Fixed \`uTLS\` \`http/1.1\` ALPN transport bug, round-robin source interleaving, 80 multi-source embedded seeds, and full \`VMess AEAD\` + \`VLESS\` + \`Trojan\` + \`Shadowsocks-2022/AEAD\` + \`SOCKS5\` + \`HTTP/HTTPS\` support"
-            echo "- **Upgraded Custom Config & Subscription Manager:** Add single/multi configs, Base64 bundles, noisy Telegram posts, or \`https://\` Subscription URLs with live connectivity/ping verification, persistent storage, and 1-tap switching"
-            echo "- **Perfected Chrome Omnibox (Address Bar):** Smart LTR/RTL direction, full Persian/English spacebar keyboard, Chrome Current-Page Copy/Share/Edit bar, Clipboard Paste & Go, \`↖\` suggestion refine, and NTP fakebox unification"
-            echo "- **Resumable Tunneled Download Engine:** Live progress bar & speed (\`MB/s\`), HTTP \`Range\` Pause/Resume, Retry, \`Cookie\`+\`Referer\` forwarding, RFC 5987 \`Content-Disposition\` filename resolution, \`blob:\`/\`data:\` JS bridge, \`+ Download by URL\`, and safe \`.apk\` PackageInstaller + \`FileProvider\` support across API 21–35"
+            echo "- **100% Google Play Protect Compliant:** True \`-buildmode=c-shared\` JNI native engine (\`System.loadLibrary(\"gfproxy\")\`, zero \`ProcessBuilder\`/\`setExecutable\`), zero \`REQUEST_INSTALL_PACKAGES\`, strict \`SslErrorHandler.cancel()\`, zero private-API reflection, clean \`io.github.has2sanbaba.drbrowser\` identity & cached V1+V2+V3 keystore"
+            echo "- **Authentic 2026 Google Chrome Android UI & Full Features:** Material 3 Expressive Chrome Colors, movable Top/Bottom Address Bar, Chrome Tune (\`⊶\`) Site Controls, Google Lens + Voice NTP, 2-Column Live-Thumbnail Grid Tab Switcher with Pin & Duplicate Tab, Listen to this Page (TTS), Reader Mode, Print to PDF, Translate, Find in Page, Bookmarks, History & Incognito"
+            echo "- **Integrated IDM Video & Stream Sniffer + Multi-Thread/HLS Downloader:** Automatic 3-layer detection of \`.mp4\`/\`.webm\`/\`.mkv\`/\`.mp3\` & \`.m3u8\` HLS streams, floating \`🎬 دانلود ویدیو\` pill, master playlist resolution picker (\`1080p\`/\`720p\`/\`480p\`/\`360p\`), 4–6 connection HTTP \`Range\` accelerator, and hardware-free \`MediaMuxer\` TS-to-MP4 remuxing"
             echo ""
             echo "### 📦 Ready-to-Install Lightweight Release APKs"
             echo "| File | Size | SHA-256 |"
@@ -204,7 +215,7 @@ jobs:
       - name: Upload Signed Release APKs Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: Dr-Browser-v5-APKs
+          name: Dr-Browser-v6-APKs
           path: dist/*
           if-no-files-found: error
           retention-days: 90
@@ -212,7 +223,7 @@ jobs:
       - name: Upload Debug Universal APK Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: Dr-Browser-v5-Debug-APK
+          name: Dr-Browser-v6-Debug-APK
           path: app/build/outputs/apk/debug/app-universal-debug.apk
           if-no-files-found: warn
           retention-days: 30
@@ -221,13 +232,13 @@ jobs:
         if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v') || github.event.inputs.publish_release == 'true'
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || format('v5.0.0-build.{0}', github.run_number) }}
-          name: "Dr Browser v5.0 Chrome Edition (${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || format('Build #{0}', github.run_number) }})"
+          tag_name: ${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || format('v6.0.0-build.{0}', github.run_number) }}
+          name: "Dr Browser v6.0 Chrome + IDM Edition (${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || format('Build #{0}', github.run_number) }})"
           generate_release_notes: true
           files: |
-            dist/Dr-Browser-v5.0.0-universal-release.apk
-            dist/Dr-Browser-v5.0.0-arm64-v8a-release.apk
-            dist/Dr-Browser-v5.0.0-armeabi-v7a-release.apk
-            dist/Dr-Browser-v5.0.0-x86_64-release.apk
-            dist/Dr-Browser-v5.0.0-x86-release.apk
+            dist/Dr-Browser-v6.0.0-universal-release.apk
+            dist/Dr-Browser-v6.0.0-arm64-v8a-release.apk
+            dist/Dr-Browser-v6.0.0-armeabi-v7a-release.apk
+            dist/Dr-Browser-v6.0.0-x86_64-release.apk
+            dist/Dr-Browser-v6.0.0-x86-release.apk
             dist/SHA256SUMS.txt
