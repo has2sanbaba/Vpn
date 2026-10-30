@@ -1243,24 +1243,24 @@ class DownloadEngine private constructor(private val appContext: Context) {
         return File(dir, "${System.currentTimeMillis()}_$clean")
     }
 
+    data class ByteShard(
+        val index: Int,
+        val start: Long,
+        val endInclusive: Long
+    ) {
+        val expectedBytes: Long get() = endInclusive - start + 1L
+    }
+
+    data class ParallelShardPlan(
+        val totalBytes: Long,
+        val finalMime: String,
+        val shards: List<ByteShard>
+    )
+
     companion object {
         private const val MIN_MULTI_THREAD_BYTES = 2_621_440L // 2.5 MB
         const val DEFAULT_DOWNLOAD_UA =
             "Mozilla/5.0 (Linux; Android 15; Pixel 9) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/134.0.0.0 Mobile Safari/537.36"
-
-        data class ByteShard(
-            val index: Int,
-            val start: Long,
-            val endInclusive: Long
-        ) {
-            val expectedBytes: Long get() = endInclusive - start + 1L
-        }
-
-        data class ParallelShardPlan(
-            val totalBytes: Long,
-            val finalMime: String,
-            val shards: List<ByteShard>
-        )
 
         fun partFileFor(stagingFile: File, shardIndex: Int): File =
             File("${stagingFile.absolutePath}.part$shardIndex")
