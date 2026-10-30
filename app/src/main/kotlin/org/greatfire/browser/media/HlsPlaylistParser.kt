@@ -313,6 +313,9 @@ object HlsPlaylistParser {
                             } else if (keyUri.isNotEmpty()) {
                                 currentAesKeyUrl = resolveRelativeUrl(baseUrl, keyUri)
                                 currentAesIv = attrs["IV"]?.let(::parseHexIv)
+                                if (drmMethod.isEmpty()) {
+                                    drmMethod = "AES-128"
+                                }
                             }
                         }
                         else -> {
