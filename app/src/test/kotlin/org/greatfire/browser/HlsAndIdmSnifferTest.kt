@@ -65,7 +65,7 @@ class HlsAndIdmSnifferTest {
             "https://media.example.org/vod/720p/index.m3u8"
         )
         assertFalse(parsed.isDrmOrEncrypted)
-        assertFalse(parsed.isLive)
+        assertFalse(parsed.isLiveStream)
         assertEquals("https://media.example.org/vod/720p/init.mp4", parsed.initMapUrl)
         assertEquals(2, parsed.segments.size)
         assertEquals("https://media.example.org/vod/720p/seg_001.ts", parsed.segments[0].url)
@@ -93,33 +93,31 @@ class HlsAndIdmSnifferTest {
 
         // 1. Ad network video must be ignored
         assertNull(
-            VideoStreamSniffer.inspectNetworkRequest(
+            VideoStreamSniffer.recordCandidate(
                 tabId = tabId,
-                requestUrl = "https://googleads.g.doubleclick.net/pagead/ad_video.mp4",
-                acceptHeader = "*/*",
-                pageTitleHint = "Sample Page",
-                pageUrlHint = "https://site.example.com/watch"
+                rawUrl = "https://googleads.g.doubleclick.net/pagead/ad_video.mp4",
+                pageUrl = "https://site.example.com/watch",
+                pageTitle = "Sample Page"
             )
         )
 
         // 2. HLS segment (.ts) must NOT spam the sniffer list (only the .m3u8 playlist should appear)
         assertNull(
-            VideoStreamSniffer.inspectNetworkRequest(
+            VideoStreamSniffer.recordCandidate(
                 tabId = tabId,
-                requestUrl = "https://cdn.example.com/hls/chunk_00042.ts",
-                acceptHeader = "*/*",
-                pageTitleHint = "Lecture 1",
-                pageUrlHint = "https://site.example.com/watch"
+                rawUrl = "https://cdn.example.com/hls/chunk_00042.ts",
+                pageUrl = "https://site.example.com/watch",
+                pageTitle = "Lecture 1"
             )
         )
 
         // 3. Instagram / CDN byte-sliced URL should strip bytestart & byteend to capture full MP4!
-        val instaItem = VideoStreamSniffer.inspectNetworkRequest(
+        val instaItem = VideoStreamSniffer.recordCandidate(
             tabId = tabId,
-            requestUrl = "https://scontent.cdninstagram.com/v/t50.2886-16/reel_clip.mp4?efg=abc&bytestart=0&byteend=524288&oh=xyz",
-            acceptHeader = "video/*",
-            pageTitleHint = "آموزش برنامه‌نویسی اندروید",
-            pageUrlHint = "https://www.instagram.com/reel/123/"
+            rawUrl = "https://scontent.cdninstagram.com/v/t50.2886-16/reel_clip.mp4?efg=abc&bytestart=0&byteend=524288&oh=xyz",
+            pageUrl = "https://www.instagram.com/reel/123/",
+            pageTitle = "آموزش برنامه‌نویسی اندروید",
+            mimeHint = "video/mp4"
         )
         assertNotNull(instaItem)
         assertFalse(instaItem!!.url.contains("bytestart="))
@@ -128,20 +126,19 @@ class HlsAndIdmSnifferTest {
         assertEquals(SniffedMediaKind.VIDEO, instaItem.kind)
 
         // 4. Master HLS stream detected via DOM/JS report with 1080p metadata
-        VideoStreamSniffer.onDomMediaReported(
+        VideoStreamSniffer.recordCandidate(
             tabId = tabId,
             rawUrl = "https://stream.example.com/course/lesson4/master.m3u8",
-            mimeHint = "application/x-mpegURL",
-            pageTitle = "Lesson 4 Architecture",
             pageUrl = "https://academy.example.com/lesson4",
+            pageTitle = "Lesson 4 Architecture",
+            mimeHint = "application/x-mpegURL",
             width = 1920,
             height = 1080,
-            durationSec = 325.0
+            durationSec = 325
         )
 
         val all = VideoStreamSniffer.getMediaForTab(tabId)
         assertEquals(2, all.size)
-        // HLS stream should sort first with 1080p Full HD label and 05:25 duration
         assertEquals(SniffedMediaKind.HLS_STREAM, all[0].kind)
         assertEquals("1080p Full HD", all[0].qualityLabel)
         assertEquals("05:25", all[0].formattedDuration())
