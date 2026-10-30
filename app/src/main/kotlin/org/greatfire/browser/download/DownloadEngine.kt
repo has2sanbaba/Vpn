@@ -707,7 +707,7 @@ class DownloadEngine private constructor(private val appContext: Context) {
      * IDM Resumable HLS (`.m3u8`) Video + Separate Audio Concurrent Segment Downloader & MP4 Merger!
      * - Supports `#EXT-X-MEDIA:TYPE=AUDIO` separate audio renditions (never downloads mute video!).
      * - Supports `#EXT-X-MAP` (`fMP4`), `#EXT-X-BYTERANGE`, Packed-Audio `ID3`/ADTS, and `METHOD=AES-128`.
-     * - Persists every completed segment atomically as `<targetFile>.hlsdir/*.done` so Pause -> Resume
+     * - Persists every completed segment atomically as `<targetFile>.hlsdir/<seg>.done` so Pause -> Resume
      *   continues immediately from the exact segment where it stopped!
      */
     private suspend fun runHlsStreamDownload(initialRecord: DownloadRecord, targetFile: File) {
