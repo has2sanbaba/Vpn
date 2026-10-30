@@ -503,18 +503,19 @@ func parseVMessLink(raw string) (OutboundNode, bool) {
 	}
 
 	q, _ := url.ParseQuery(rawQuery)
-	netType := strings.ToLower(strings.TrimSpace(q.Get("type")))
-	if netType == "" || netType == "raw" {
-		netType = "tcp"
-	}
-	if netType != "tcp" && netType != "ws" {
+	netType, ok := normalizeTransportName(firstNonEmpty(q.Get("type"), q.Get("net")))
+	if !ok {
 		return OutboundNode{}, false
 	}
 	sec := strings.ToLower(strings.TrimSpace(q.Get("security")))
+	pbk := strings.TrimSpace(q.Get("pbk"))
+	sid := strings.TrimSpace(q.Get("sid"))
 	if sec == "reality" {
-		return OutboundNode{}, false
+		if _, pOk := decodeRealityPublicKey(pbk); !pOk {
+			return OutboundNode{}, false
+		}
 	}
-	useTLS := sec == "tls" || sec == "ssl" || q.Get("tls") == "1"
+	useTLS := sec == "tls" || sec == "ssl" || sec == "reality" || q.Get("tls") == "1"
 	sni := firstNonEmpty(strings.TrimSpace(q.Get("sni")), strings.TrimSpace(q.Get("peer")), strings.TrimSpace(q.Get("host")))
 	if sni == "" && net.ParseIP(host) == nil {
 		sni = host
@@ -529,20 +530,27 @@ func parseVMessLink(raw string) (OutboundNode, bool) {
 		urlTag = fmt.Sprintf("VMess-%s:%s", host, port)
 	}
 	return OutboundNode{
-		ID:            fmt.Sprintf("vmess:%s:%s:%s:%s:%s", host, port, uuidStr, netType, sni),
-		Name:          urlTag,
-		RawURI:        raw,
-		Protocol:      ProtoVMess,
-		Host:          host,
-		Port:          port,
-		UUID:          uuidStr,
-		Cipher:        cipherName,
-		Transport:     netType,
-		TLS:           useTLS,
-		SNI:           sni,
-		WSHost:        wsHost,
-		WSPath:        wsPath,
-		AllowInsecure: insecure,
+		ID:               fmt.Sprintf("vmess:%s:%s:%s:%s:%s:%s", host, port, uuidStr, netType, sni, wsPath),
+		Name:             urlTag,
+		RawURI:           raw,
+		Protocol:         ProtoVMess,
+		Host:             host,
+		Port:             port,
+		UUID:             uuidStr,
+		Cipher:           cipherName,
+		Transport:        netType,
+		TLS:              useTLS,
+		Security:         sec,
+		SNI:              sni,
+		WSHost:           wsHost,
+		WSPath:           wsPath,
+		Mode:             strings.ToLower(strings.TrimSpace(q.Get("mode"))),
+		ServiceName:      strings.TrimSpace(q.Get("serviceName")),
+		Fingerprint:      strings.TrimSpace(q.Get("fp")),
+		ALPN:             strings.TrimSpace(q.Get("alpn")),
+		RealityPublicKey: pbk,
+		RealityShortID:   sid,
+		AllowInsecure:    insecure,
 	}, true
 }
 
@@ -579,16 +587,13 @@ func parseVMessJSON(raw, jsonText, fallbackTag string) (OutboundNode, bool) {
 		return OutboundNode{}, false
 	}
 
-	netType := strings.ToLower(str("net", "network"))
-	if netType == "" || netType == "raw" {
-		netType = "tcp"
-	}
-	// Reject HTTP header-obfs over raw TCP ("type": "http") unless ws
+	rawNet := strings.ToLower(str("net", "network"))
 	hdrType := strings.ToLower(str("type"))
-	if netType == "tcp" && hdrType != "" && hdrType != "none" {
+	if rawNet == "tcp" && hdrType != "" && hdrType != "none" {
 		return OutboundNode{}, false
 	}
-	if netType != "tcp" && netType != "ws" {
+	netType, ok := normalizeTransportName(rawNet)
+	if !ok {
 		return OutboundNode{}, false
 	}
 
@@ -597,6 +602,10 @@ func parseVMessJSON(raw, jsonText, fallbackTag string) (OutboundNode, bool) {
 		return OutboundNode{}, false
 	}
 	useTLS := tlsField == "tls" || tlsField == "ssl" || tlsField == "1" || tlsField == "true"
+	sec := ""
+	if useTLS {
+		sec = "tls"
+	}
 
 	wsHost := str("host")
 	if strings.Contains(wsHost, ",") {
@@ -610,6 +619,10 @@ func parseVMessJSON(raw, jsonText, fallbackTag string) (OutboundNode, bool) {
 		wsHost = firstNonEmpty(sni, host)
 	}
 	wsPath := firstNonEmpty(str("path"), "/")
+	svcName := str("serviceName", "path")
+	if netType != "grpc" {
+		svcName = ""
+	}
 
 	scy := strings.ToLower(str("scy", "security_cipher", "cipher"))
 	cipherName := "aes-128-gcm"
@@ -622,7 +635,7 @@ func parseVMessJSON(raw, jsonText, fallbackTag string) (OutboundNode, bool) {
 
 	tag := firstNonEmpty(fallbackTag, str("ps", "remarks", "name"), fmt.Sprintf("VMess-%s:%s", host, port))
 	return OutboundNode{
-		ID:            fmt.Sprintf("vmess:%s:%s:%s:%s:%s", host, port, uuidStr, netType, sni),
+		ID:            fmt.Sprintf("vmess:%s:%s:%s:%s:%s:%s", host, port, uuidStr, netType, sni, wsPath),
 		Name:          tag,
 		RawURI:        raw,
 		Protocol:      ProtoVMess,
@@ -632,9 +645,14 @@ func parseVMessJSON(raw, jsonText, fallbackTag string) (OutboundNode, bool) {
 		Cipher:        cipherName,
 		Transport:     netType,
 		TLS:           useTLS,
+		Security:      sec,
 		SNI:           sni,
 		WSHost:        wsHost,
 		WSPath:        wsPath,
+		Mode:          strings.ToLower(str("mode")),
+		ServiceName:   svcName,
+		Fingerprint:   str("fp", "fingerprint"),
+		ALPN:          str("alpn"),
 		AllowInsecure: insecure,
 	}, true
 }

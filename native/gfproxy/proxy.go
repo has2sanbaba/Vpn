@@ -44,6 +44,9 @@ func NewGatewayServer(router *UpstreamRouter, doh *DoHResolver, pool *NodePool, 
 	if racer == nil {
 		racer = NewConnectionRacer(router, pool, "")
 	}
+	pool.SetOnBestChanged(func() {
+		racer.ResetMethodCache()
+	})
 	return &GatewayServer{
 		router:    router,
 		doh:       doh,
@@ -460,6 +463,11 @@ type StatusResponse struct {
 	DoHCacheHits      uint64        `json:"doh_cache_hits"`
 	ReadyNodes        int           `json:"ready_nodes"`
 	ActiveSources     int           `json:"active_sources"`
+	ConfiguredSources int           `json:"configured_sources"`
+	ReachableSources  int           `json:"reachable_sources"`
+	LastRetestSecAgo  int64         `json:"last_retest_sec_ago"`
+	NextRetestInSec   int64         `json:"next_retest_in_sec"`
+	RetestCount       uint64        `json:"retest_count"`
 	BestNode          string        `json:"best_node,omitempty"`
 	BestSource        string        `json:"best_source,omitempty"`
 	BestProto         string        `json:"best_proto,omitempty"`
@@ -496,6 +504,7 @@ func NewControlMux(gw *GatewayServer, router *UpstreamRouter, doh *DoHResolver, 
 			return
 		}
 		bestName, bestSource, bestProto, bestRTT, bestSpeed, readyCnt, activeSrcs := gw.pool.BestNodeSummary()
+		lastAgo, nextIn, retestCnt := gw.pool.RetestMetrics()
 		cfg := router.GetConfig()
 		cfg.CustomURI = gw.pool.GetCustomURI()
 		resp := StatusResponse{
@@ -511,6 +520,11 @@ func NewControlMux(gw *GatewayServer, router *UpstreamRouter, doh *DoHResolver, 
 			DoHCacheHits:      doh.CacheHits.Load(),
 			ReadyNodes:        readyCnt,
 			ActiveSources:     activeSrcs,
+			ConfiguredSources: gw.pool.ConfiguredSourcesCount(),
+			ReachableSources:  gw.pool.ReachableSourcesCount(),
+			LastRetestSecAgo:  lastAgo,
+			NextRetestInSec:   nextIn,
+			RetestCount:       retestCnt,
 			BestNode:          bestName,
 			BestSource:        bestSource,
 			BestProto:         bestProto,
@@ -672,6 +686,37 @@ func NewControlMux(gw *GatewayServer, router *UpstreamRouter, doh *DoHResolver, 
 		gw.pool.RefreshFromFeedsAsync()
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]any{"ok": true})
+	})
+
+	mux.HandleFunc("/retest", func(w http.ResponseWriter, r *http.Request) {
+		if !authorized(w, r) {
+			return
+		}
+		ctx, cancel := context.WithTimeout(r.Context(), 6500*time.Millisecond)
+		defer cancel()
+		res := gw.pool.RunAutoRetest(ctx)
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(res)
+	})
+
+	mux.HandleFunc("/lifecycle", func(w http.ResponseWriter, r *http.Request) {
+		if !authorized(w, r) {
+			return
+		}
+		fg := true
+		if qfg := r.URL.Query().Get("foreground"); qfg != "" {
+			fg = qfg == "1" || strings.EqualFold(qfg, "true")
+		} else if r.Body != nil {
+			var body struct {
+				Foreground bool `json:"foreground"`
+			}
+			if json.NewDecoder(io.LimitReader(r.Body, 1024)).Decode(&body) == nil {
+				fg = body.Foreground
+			}
+		}
+		gw.pool.SetForeground(fg)
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{"ok": true, "foreground": fg})
 	})
 
 	mux.HandleFunc("/probe", func(w http.ResponseWriter, r *http.Request) {

@@ -1,10 +1,28 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="app_name">Dr Browser</string>
-    <string name="omnibox_hint">جستجو یا تایپ نشانی وب</string>
-    <string name="home_search_hint">جستجو در گوگل یا تایپ نشانی وب</string>
-    <string name="tabs_title">تب‌ها</string>
-    <string name="new_tab">تب جدید</string>
-    <string name="new_incognito_tab">تب ناشناس جدید</string>
-    <string name="panic_wipe_done">اطلاعات مرور، کوکی‌ها و حافظه پنهان پاک شد</string>
+    <string name="action_dr_proxy">پروکسی هوشمند و کانفیگ‌ها (۵۰ منبع)</string>
+    <string name="action_dr_idm">دانلودگر ویدیو و فایل (IDM)</string>
+    <string name="action_new_tab">تب جدید</string>
+    <string name="action_incognito">تب ناشناس</string>
+    <string name="action_share">اشتراک‌گذاری</string>
+    <string name="action_history">تاریخچه</string>
+    <string name="action_bookmarks">نشانک‌ها</string>
+    <string name="action_downloads">دانلودها</string>
+    <string name="action_add_bookmark">افزودن به نشانک‌ها</string>
+    <string name="action_add_to_homescreen">افزودن به صفحه اصلی</string>
+    <string name="action_find">جستجو در صفحه</string>
+    <string name="action_copy">کپی لینک</string>
+    <string name="action_forward">جلو</string>
+    <string name="action_back">عقب</string>
+    <string name="settings">تنظیمات</string>
+    <string name="home">صفحه اصلی</string>
+    <string name="search_hint">جستجو یا آدرس وب‌سایت</string>
+    <string name="untitled">بدون عنوان</string>
+    <string name="action_download">دانلود</string>
+    <string name="action_cancel">انصراف</string>
+    <string name="action_ok">تایید</string>
+    <string name="action_yes">بله</string>
+    <string name="action_no">خیر</string>
+    <string name="unknown_size">حجم نامشخص</string>
 </resources>

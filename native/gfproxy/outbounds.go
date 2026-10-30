@@ -40,24 +40,32 @@ const (
 )
 
 type OutboundNode struct {
-	ID            string       `json:"id"`
-	Name          string       `json:"name"`
-	Source        string       `json:"source,omitempty"`
-	RawURI        string       `json:"raw_uri"`
-	Protocol      NodeProtocol `json:"protocol"`
-	Host          string       `json:"host"`
-	Port          string       `json:"port"`
-	UUID          string       `json:"uuid,omitempty"`
-	Password      string       `json:"password,omitempty"`
-	Username      string       `json:"username,omitempty"`
-	Cipher        string       `json:"cipher,omitempty"`
-	Transport     string       `json:"transport"` // "tcp" or "ws"
-	TLS           bool         `json:"tls"`
-	SNI           string       `json:"sni,omitempty"`
-	WSHost        string       `json:"ws_host,omitempty"`
-	WSPath        string       `json:"ws_path,omitempty"`
-	AllowInsecure bool         `json:"allow_insecure,omitempty"`
-	AvgRTTMs      int64        `json:"avg_rtt_ms,omitempty"`
+	ID               string       `json:"id"`
+	Name             string       `json:"name"`
+	Source           string       `json:"source,omitempty"`
+	RawURI           string       `json:"raw_uri"`
+	Protocol         NodeProtocol `json:"protocol"`
+	Host             string       `json:"host"`
+	Port             string       `json:"port"`
+	UUID             string       `json:"uuid,omitempty"`
+	Password         string       `json:"password,omitempty"`
+	Username         string       `json:"username,omitempty"`
+	Cipher           string       `json:"cipher,omitempty"`
+	Transport        string       `json:"transport"` // "tcp", "ws", "xhttp", "grpc", "httpupgrade", "h2"
+	TLS              bool         `json:"tls"`
+	Security         string       `json:"security,omitempty"` // "tls", "reality", "none"
+	SNI              string       `json:"sni,omitempty"`
+	WSHost           string       `json:"ws_host,omitempty"`
+	WSPath           string       `json:"ws_path,omitempty"`
+	Mode             string       `json:"mode,omitempty"`
+	ServiceName      string       `json:"service_name,omitempty"`
+	Fingerprint      string       `json:"fingerprint,omitempty"`
+	ALPN             string       `json:"alpn,omitempty"`
+	Flow             string       `json:"flow,omitempty"`
+	RealityPublicKey string       `json:"reality_pbk,omitempty"`
+	RealityShortID   string       `json:"reality_sid,omitempty"`
+	AllowInsecure    bool         `json:"allow_insecure,omitempty"`
+	AvgRTTMs         int64        `json:"avg_rtt_ms,omitempty"`
 }
 
 var cleanCloudflareEdgeIPs = []string{
@@ -106,13 +114,13 @@ func ParseShareLinks(rawText string) []OutboundNode {
 }
 
 func ParseShareLinksWithSource(rawText string, sourceName string) []OutboundNode {
-	trimmed := strings.TrimSpace(rawText)
+	trimmed := strings.TrimSpace(SanitizeShareLinkInput(rawText))
 	if trimmed == "" {
 		return nil
 	}
 
 	// Strip optional #profile-title header lines before attempting Base64 decode if no scheme is present
-	if !containsProxyScheme(trimmed) {
+	if !containsProxyScheme(trimmed) && !strings.Contains(trimmed, "proxies:") {
 		var nonCommentLines []string
 		for _, l := range strings.Split(trimmed, "\n") {
 			lt := strings.TrimSpace(l)
@@ -121,10 +129,10 @@ func ParseShareLinksWithSource(rawText string, sourceName string) []OutboundNode
 			}
 		}
 		joined := strings.Join(nonCommentLines, "")
-		if decoded, ok := decodeFlexibleBase64(joined); ok && containsProxyScheme(decoded) {
-			trimmed = decoded
-		} else if decoded, ok := decodeFlexibleBase64(trimmed); ok && containsProxyScheme(decoded) {
-			trimmed = decoded
+		if decoded, ok := decodeFlexibleBase64(joined); ok && (containsProxyScheme(decoded) || strings.Contains(decoded, "proxies:")) {
+			trimmed = SanitizeShareLinkInput(decoded)
+		} else if decoded, ok := decodeFlexibleBase64(trimmed); ok && (containsProxyScheme(decoded) || strings.Contains(decoded, "proxies:")) {
+			trimmed = SanitizeShareLinkInput(decoded)
 		}
 	}
 
@@ -142,6 +150,15 @@ func ParseShareLinksWithSource(rawText string, sourceName string) []OutboundNode
 		if !seen[node.ID] {
 			seen[node.ID] = true
 			out = append(out, node)
+		}
+	}
+
+	if strings.Contains(trimmed, "proxies:") || len(out) == 0 {
+		for _, cNode := range ParseClashProxies(trimmed, sourceName) {
+			if !seen[cNode.ID] {
+				seen[cNode.ID] = true
+				out = append(out, cNode)
+			}
 		}
 	}
 	return out
@@ -252,21 +269,17 @@ func inferSourceFromRemarkOrDefault(remark, fallback string) string {
 
 // DiagnoseUnsupportedShareLink provides a clear Persian reason when a user pastes an unsupported link type.
 func DiagnoseUnsupportedShareLink(raw string) string {
-	low := strings.ToLower(strings.TrimSpace(raw))
+	low := strings.ToLower(strings.TrimSpace(SanitizeShareLinkInput(raw)))
 	switch {
-	case strings.Contains(low, "reality") || strings.Contains(low, "pbk="):
-		return "این کانفیگ از نوع VLESS-Reality است؛ لطفاً کانفیگ‌های استاندارد VLESS (WS/TLS/TCP)، VMess، Trojan، Shadowsocks یا لینک اشتراک (Sub) وارد کنید."
-	case strings.Contains(low, "type=grpc") || strings.Contains(low, "serviceName="):
-		return "کانفیگ‌های نوع gRPC پشتیبانی نمی‌شوند؛ لطفاً کانفیگ نوع WS یا TCP یا لینک اشتراک وارد کنید."
-	case strings.Contains(low, "hysteria2://") || strings.Contains(low, "hy2://") || strings.Contains(low, "tuic://") || strings.Contains(low, "wireguard://"):
-		return "پروتکل Hysteria2/TUIC/WireGuard پشتیبانی نمی‌شود؛ از VLESS، VMess، Trojan، SS، SOCKS5 یا لینک اشتراک استفاده کنید."
+	case strings.Contains(low, "hysteria2://") || strings.Contains(low, "hy2://") || strings.Contains(low, "tuic://") || strings.Contains(low, "wireguard://") || strings.Contains(low, "wg://"):
+		return "پروتکل UDP (Hysteria2/TUIC/WireGuard) پشتیبانی نمی‌شود؛ از VLESS (شامل XHTTP/Reality/WS/gRPC/TCP)، VMess، Trojan، SS، SOCKS5 یا لینک اشتراک استفاده کنید."
 	default:
-		return "فرمت کانفیگ معتبر نیست. لینک‌های مجاز: vless://, vmess://, trojan://, ss://, socks5:// یا لینک اشتراک https://..."
+		return "فرمت کانفیگ معتبر نیست. لینک‌های مجاز: vless:// (شامل xhttp/reality/ws/grpc/tcp), vmess://, trojan://, ss://, socks5:// یا لینک اشتراک https://..."
 	}
 }
 
 func ParseSingleShareLink(uri string) (OutboundNode, bool) {
-	uri = strings.TrimSpace(uri)
+	uri = strings.TrimSpace(SanitizeShareLinkInput(uri))
 	lower := strings.ToLower(uri)
 	switch {
 	case strings.HasPrefix(lower, "vless://"):
@@ -362,6 +375,9 @@ func parseVLESSLink(raw string) (OutboundNode, bool) {
 		return OutboundNode{}, false
 	}
 	uuidStr := strings.TrimSpace(mainPart[:at])
+	if uUnesc, uErr := url.QueryUnescape(uuidStr); uErr == nil && uUnesc != "" {
+		uuidStr = strings.TrimSpace(uUnesc)
+	}
 	if _, ok := parseUUIDBytes(uuidStr); !ok {
 		return OutboundNode{}, false
 	}
@@ -371,33 +387,67 @@ func parseVLESSLink(raw string) (OutboundNode, bool) {
 	}
 
 	q, _ := url.ParseQuery(rawQuery)
-	netType := strings.ToLower(strings.TrimSpace(q.Get("type")))
-	if netType == "" || netType == "raw" {
-		netType = "tcp"
+	rawType := q.Get("type")
+	if rawType == "" {
+		rawType = q.Get("net")
 	}
-	if netType != "tcp" && netType != "ws" {
+	netType, ok := normalizeTransportName(rawType)
+	if !ok {
+		return OutboundNode{}, false
+	}
+
+	// Reject experimental custom post-quantum VLESS inner encryption, accept standard "none" / ""
+	if enc := strings.ToLower(strings.TrimSpace(q.Get("encryption"))); enc != "" && enc != "none" && enc != "zero" {
 		return OutboundNode{}, false
 	}
 
 	sec := strings.ToLower(strings.TrimSpace(q.Get("security")))
+	pbk := strings.TrimSpace(q.Get("pbk"))
+	sid := strings.TrimSpace(q.Get("sid"))
 	if sec == "reality" {
-		// Handled by compatible TLS/WS/SS nodes instead of heavy external daemon
-		return OutboundNode{}, false
-	}
-	if flow := strings.ToLower(strings.TrimSpace(q.Get("flow"))); flow != "" && flow != "none" {
-		return OutboundNode{}, false
+		if _, pOk := decodeRealityPublicKey(pbk); !pOk {
+			return OutboundNode{}, false
+		}
+		if _, sOk := decodeRealityShortID(sid); !sOk {
+			return OutboundNode{}, false
+		}
 	}
 
-	useTLS := sec == "tls" || sec == "ssl" || port == "443" || port == "2053" || port == "2083" || port == "2087" || port == "2096" || port == "8443"
+	flow := strings.ToLower(strings.TrimSpace(q.Get("flow")))
+	if flow == "none" {
+		flow = ""
+	}
+	if flow != "" && flow != "xtls-rprx-vision" && flow != "xtls-rprx-vision-udp443" {
+		return OutboundNode{}, false
+	}
+	if flow == "xtls-rprx-vision-udp443" {
+		flow = "xtls-rprx-vision"
+	}
+
+	useTLS := sec == "tls" || sec == "ssl" || sec == "reality" ||
+		port == "443" || port == "2053" || port == "2083" || port == "2087" || port == "2096" || port == "8443"
 	if sec == "none" {
 		useTLS = false
+	}
+	if sec == "" {
+		if useTLS {
+			sec = "tls"
+		} else {
+			sec = "none"
+		}
 	}
 
 	sni := strings.TrimSpace(q.Get("sni"))
 	if sni == "" {
 		sni = strings.TrimSpace(q.Get("peer"))
 	}
+	if sni == "" {
+		sni = strings.TrimSpace(q.Get("serverName"))
+	}
 	wsHost := strings.TrimSpace(q.Get("host"))
+	if wsHost == "" {
+		wsHost = strings.TrimSpace(q.Get("authority"))
+	}
 	if sni == "" && wsHost != "" {
 		sni = wsHost
 	}
@@ -416,27 +466,40 @@ func parseVLESSLink(raw string) (OutboundNode, bool) {
 		wsPath = "/"
 	}
 
+	mode := strings.ToLower(strings.TrimSpace(q.Get("mode")))
+	serviceName := strings.TrimSpace(q.Get("serviceName"))
+	fp := strings.TrimSpace(q.Get("fp"))
+	alpn := strings.TrimSpace(q.Get("alpn"))
+
 	insecure := q.Get("allowInsecure") == "1" || strings.EqualFold(q.Get("allowInsecure"), "true") ||
 		q.Get("insecure") == "1" || strings.EqualFold(q.Get("insecure"), "true")
 
 	if tag == "" {
 		tag = fmt.Sprintf("VLESS-%s:%s", host, port)
 	}
-	id := fmt.Sprintf("vless:%s:%s:%s:%s:%s", host, port, uuidStr, netType, sni)
+	id := fmt.Sprintf("vless:%s:%s:%s:%s:%s:%s", host, port, uuidStr, netType, sni, wsPath)
 	return OutboundNode{
-		ID:            id,
-		Name:          tag,
-		RawURI:        raw,
-		Protocol:      ProtoVLESS,
-		Host:          host,
-		Port:          port,
-		UUID:          uuidStr,
-		Transport:     netType,
-		TLS:           useTLS,
-		SNI:           sni,
-		WSHost:        wsHost,
-		WSPath:        wsPath,
-		AllowInsecure: insecure,
+		ID:               id,
+		Name:             tag,
+		RawURI:           raw,
+		Protocol:         ProtoVLESS,
+		Host:             host,
+		Port:             port,
+		UUID:             uuidStr,
+		Transport:        netType,
+		TLS:              useTLS,
+		Security:         sec,
+		SNI:              sni,
+		WSHost:           wsHost,
+		WSPath:           wsPath,
+		Mode:             mode,
+		ServiceName:      serviceName,
+		Fingerprint:      fp,
+		ALPN:             alpn,
+		Flow:             flow,
+		RealityPublicKey: pbk,
+		RealityShortID:   sid,
+		AllowInsecure:    insecure,
 	}, true
 }
 
@@ -458,24 +521,38 @@ func parseTrojanLink(raw string) (OutboundNode, bool) {
 	}
 
 	q, _ := url.ParseQuery(rawQuery)
-	netType := strings.ToLower(strings.TrimSpace(q.Get("type")))
-	if netType == "" || netType == "raw" {
-		netType = "tcp"
+	rawType := q.Get("type")
+	if rawType == "" {
+		rawType = q.Get("net")
 	}
-	if netType != "tcp" && netType != "ws" {
+	netType, ok := normalizeTransportName(rawType)
+	if !ok {
 		return OutboundNode{}, false
 	}
 	sec := strings.ToLower(strings.TrimSpace(q.Get("security")))
+	pbk := strings.TrimSpace(q.Get("pbk"))
+	sid := strings.TrimSpace(q.Get("sid"))
 	if sec == "reality" {
-		return OutboundNode{}, false
+		if _, pOk := decodeRealityPublicKey(pbk); !pOk {
+			return OutboundNode{}, false
+		}
+		if _, sOk := decodeRealityShortID(sid); !sOk {
+			return OutboundNode{}, false
+		}
 	}
 	useTLS := sec != "none"
+	if sec == "" {
+		sec = "tls"
+	}
 
 	sni := strings.TrimSpace(q.Get("sni"))
 	if sni == "" {
 		sni = strings.TrimSpace(q.Get("peer"))
 	}
 	wsHost := strings.TrimSpace(q.Get("host"))
+	if wsHost == "" {
+		wsHost = strings.TrimSpace(q.Get("authority"))
+	}
 	if sni == "" && wsHost != "" {
 		sni = wsHost
 	}
@@ -493,27 +570,38 @@ func parseTrojanLink(raw string) (OutboundNode, bool) {
 	if wsPath == "" {
 		wsPath = "/"
 	}
+	mode := strings.ToLower(strings.TrimSpace(q.Get("mode")))
+	serviceName := strings.TrimSpace(q.Get("serviceName"))
+	fp := strings.TrimSpace(q.Get("fp"))
+	alpn := strings.TrimSpace(q.Get("alpn"))
 	insecure := q.Get("allowInsecure") == "1" || strings.EqualFold(q.Get("allowInsecure"), "true") ||
-		q.Get("insecure") == "1" || strings.EqualFold(q.Get("insecure"), "true") || sni == ""
+		q.Get("insecure") == "1" || strings.EqualFold(q.Get("insecure"), "true") || (sni == "" && sec != "reality")
 
 	if tag == "" {
 		tag = fmt.Sprintf("Trojan-%s:%s", host, port)
 	}
-	id := fmt.Sprintf("trojan:%s:%s:%s:%s", host, port, password, netType)
+	id := fmt.Sprintf("trojan:%s:%s:%s:%s:%s", host, port, password, netType, wsPath)
 	return OutboundNode{
-		ID:            id,
-		Name:          tag,
-		RawURI:        raw,
-		Protocol:      ProtoTrojan,
-		Host:          host,
-		Port:          port,
-		Password:      password,
-		Transport:     netType,
-		TLS:           useTLS,
-		SNI:           sni,
-		WSHost:        wsHost,
-		WSPath:        wsPath,
-		AllowInsecure: insecure,
+		ID:               id,
+		Name:             tag,
+		RawURI:           raw,
+		Protocol:         ProtoTrojan,
+		Host:             host,
+		Port:             port,
+		Password:         password,
+		Transport:        netType,
+		TLS:              useTLS,
+		Security:         sec,
+		SNI:              sni,
+		WSHost:           wsHost,
+		WSPath:           wsPath,
+		Mode:             mode,
+		ServiceName:      serviceName,
+		Fingerprint:      fp,
+		ALPN:             alpn,
+		RealityPublicKey: pbk,
+		RealityShortID:   sid,
+		AllowInsecure:    insecure,
 	}, true
 }
 
@@ -692,78 +780,68 @@ func DialOutboundNode(ctx context.Context, doh *DoHResolver, node OutboundNode, 
 }
 
 func dialNodeCarrier(ctx context.Context, doh *DoHResolver, node OutboundNode) (net.Conn, error) {
-	var candidateIPs []string
-	if ip := net.ParseIP(node.Host); ip != nil {
-		candidateIPs = append(candidateIPs, ip.String())
-		if node.TLS && node.Transport == "ws" && isCloudflareIP(ip.String()) {
-			candidateIPs = append(candidateIPs, cleanCloudflareEdgeIPs[:2]...)
-		}
-	} else if doh != nil {
-		ips, err := doh.Resolve(ctx, node.Host)
-		if err == nil && len(ips) > 0 {
-			candidateIPs = append(candidateIPs, ips[0])
-			if node.TLS && node.Transport == "ws" && isCloudflareIP(ips[0]) {
-				candidateIPs = append(candidateIPs, cleanCloudflareEdgeIPs[0])
-			}
-		}
-	}
-	if len(candidateIPs) == 0 {
-		candidateIPs = []string{node.Host}
+	switch node.Transport {
+	case "xhttp", "splithttp":
+		return dialXHTTPStream(ctx, doh, node)
+	case "grpc", "gun":
+		return dialGRPCTunStream(ctx, doh, node)
+	case "h2", "http", "http2":
+		return dialH2Stream(ctx, doh, node)
 	}
 
-	var rawConn net.Conn
-	var lastErr error
-	for i, dialHost := range candidateIPs {
-		perAttemptTimeout := 3200 * time.Millisecond
-		if i > 0 {
-			perAttemptTimeout = 2500 * time.Millisecond
-		}
-		var d net.Dialer
-		d.Timeout = perAttemptTimeout
-		c, err := d.DialContext(ctx, "tcp", net.JoinHostPort(dialHost, node.Port))
-		if err == nil {
-			rawConn = c
-			break
-		}
-		lastErr = err
-	}
-	if rawConn == nil {
-		return nil, fmt.Errorf("dial node %s:%s failed: %w", node.Host, node.Port, lastErr)
+	rawConn, err := dialRawNodeTCP(ctx, doh, node)
+	if err != nil {
+		return nil, err
 	}
 
 	stream := rawConn
-	if node.TLS {
+	if node.Security == "reality" {
+		realityStream, _, _, rErr := handshakeRealityTLS(ctx, rawConn, node)
+		if rErr != nil {
+			_ = rawConn.Close()
+			return nil, rErr
+		}
+		stream = realityStream
+	} else if node.TLS {
 		// Fragment outer TLS ClientHello so ISP DPI cannot inspect or block the proxy server's SNI!
 		fragConn := NewFragmentingConn(rawConn, 20, 2*time.Millisecond)
 		sni := node.SNI
 		if sni == "" && net.ParseIP(node.Host) == nil {
 			sni = node.Host
 		}
-		// Always negotiate http/1.1 on outer TLS carrier so raw TCP VLESS/Trojan/VMess streams
-		// and HTTP/1.1 WebSocket upgrades never get misrouted to Nginx/Caddy HTTP/2 web fallbacks!
-		tlsStream, err := handshakeChromeUTLS(ctx, fragConn, sni, true, node.AllowInsecure || sni == "")
-		if err != nil {
+		// Negotiate http/1.1 on TCP/WS/HTTPUpgrade outer TLS carrier so raw TCP VLESS/Trojan/VMess streams
+		// and HTTP/1.1 WebSocket/HTTPUpgrade upgrades never get misrouted to HTTP/2 web fallbacks.
+		tlsStream, _, tErr := handshakeTLSWithALPN(ctx, fragConn, sni, node.Fingerprint, []string{"http/1.1"}, node.AllowInsecure || sni == "")
+		if tErr != nil {
 			_ = rawConn.Close()
-			return nil, err
+			return nil, tErr
 		}
 		stream = tlsStream
 	}
 
-	if node.Transport == "ws" {
-		wsHost := node.WSHost
-		if wsHost == "" {
-			if node.SNI != "" {
-				wsHost = node.SNI
-			} else {
-				wsHost = node.Host
-			}
-		}
-		wsStream, err := dialWebSocketStream(stream, wsHost, node.WSPath)
-		if err != nil {
+	switch node.Transport {
+	case "ws":
+		wsHost := firstNonEmpty(node.WSHost, node.SNI, node.Host)
+		wsStream, wErr := dialWebSocketStream(stream, wsHost, node.WSPath)
+		if wErr != nil {
 			_ = stream.Close()
-			return nil, err
+			return nil, wErr
 		}
 		stream = wsStream
+	case "httpupgrade":
+		upHost := firstNonEmpty(node.WSHost, node.SNI, node.Host)
+		upStream, uErr := dialHTTPUpgradeStream(stream, upHost, node.WSPath)
+		if uErr != nil {
+			_ = stream.Close()
+			return nil, uErr
+		}
+		stream = upStream
+	}
+
+	if node.Protocol == ProtoVLESS && node.Flow == "xtls-rprx-vision" {
+		if uuidBytes, ok := parseUUIDBytes(node.UUID); ok {
+			stream = newXTLSVisionConn(stream, rawConn, uuidBytes)
+		}
 	}
 
 	return stream, nil
@@ -857,11 +935,19 @@ func dialVLESS(ctx context.Context, doh *DoHResolver, node OutboundNode, targetH
 		return nil, err
 	}
 
-	// Build VLESS v0 header: [ver=0x00][uuid 16B][addonsLen=0x00][cmd=0x01][port 2B][addrType][addr]
+	// Build VLESS v0 header: [ver=0x00][uuid 16B][addons][cmd=0x01][port 2B][addrType][addr]
 	var hdr bytes.Buffer
 	hdr.WriteByte(0x00)
 	hdr.Write(uuidBytes[:])
-	hdr.WriteByte(0x00) // addons length = 0
+	if node.Flow == "xtls-rprx-vision" {
+		// Protobuf Addons{Flow: "xtls-rprx-vision"} => len 18 (0x12), tag 0x0A, len 0x10, "xtls-rprx-vision"
+		hdr.WriteByte(0x12)
+		hdr.WriteByte(0x0A)
+		hdr.WriteByte(0x10)
+		hdr.WriteString("xtls-rprx-vision")
+	} else {
+		hdr.WriteByte(0x00) // addons length = 0
+	}
 	hdr.WriteByte(0x01) // TCP
 	hdr.WriteByte(byte(portNum >> 8))
 	hdr.WriteByte(byte(portNum & 0xFF))

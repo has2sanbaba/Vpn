@@ -25,6 +25,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -956,5 +957,252 @@ func TestInMemoryJNIControlHandlerAndUTF8Safety(t *testing.T) {
 		t.Fatalf("expected ok=true and emoji best_node, got %+v", st)
 	}
 }
+
+func TestExactUserVLESSXHTTPAndPasteSanitization(t *testing.T) {
+	exactUserURI := "vless://e947d49f-e235-4e89-9411-5df3ff17acc3@t.gptban.com:443?mode=auto&path=%2Fdl%3Fed%3D2056&security=tls&encryption=none&insecure=0&host=t.gptban.com&fp=chrome&type=xhttp&allowInsecure=0&sni=t.gptban.com#VIP%F0%9F%87%B9%F0%9F%87%B7%237"
+
+	node, ok := ParseSingleShareLink(exactUserURI)
+	if !ok {
+		t.Fatalf("expected exact user vless://...type=xhttp URI to parse cleanly")
+	}
+	if node.Protocol != ProtoVLESS || node.Host != "t.gptban.com" || node.Port != "443" {
+		t.Fatalf("unexpected host/port/proto: %+v", node)
+	}
+	if node.UUID != "e947d49f-e235-4e89-9411-5df3ff17acc3" {
+		t.Fatalf("unexpected UUID: %q", node.UUID)
+	}
+	if node.Transport != "xhttp" || node.Mode != "auto" || node.WSPath != "/dl?ed=2056" {
+		t.Fatalf("unexpected xhttp params: transport=%q mode=%q path=%q", node.Transport, node.Mode, node.WSPath)
+	}
+	if !node.TLS || node.Security != "tls" || node.Fingerprint != "chrome" || node.SNI != "t.gptban.com" || node.WSHost != "t.gptban.com" {
+		t.Fatalf("unexpected TLS/SNI/fp params: %+v", node)
+	}
+	if node.Name != "VIP🇹🇷#7" {
+		t.Fatalf("expected multi-hash + emoji tag 'VIP🇹🇷#7', got %q", node.Name)
+	}
+
+	// Verify HTML entity + Markdown paste corruption also parses identically
+	mangledURI := "vless://<mailto:e947d49f-e235-4e89-9411-5df3ff17acc3@t.gptban.com>:443?mode=auto&amp;path=%2Fdl%3Fed%3D2056&amp;security=tls&amp;encryption=none&amp;insecure=0&amp;host=[t.gptban.com](http://t.gptban.com)&amp;fp=chrome&amp;type=xhttp&amp;allowInsecure=0&amp;sni=[t.gptban.com](http://t.gptban.com)#VIP%F0%9F%87%B9%F0%9F%87%B7%237"
+	mNodes := ParseShareLinksWithSource(mangledURI, "UserPaste")
+	if len(mNodes) != 1 || mNodes[0].Host != "t.gptban.com" || mNodes[0].Transport != "xhttp" || mNodes[0].WSPath != "/dl?ed=2056" {
+		t.Fatalf("expected mangled markdown/HTML URI to sanitize & parse cleanly, got %+v", mNodes)
+	}
+
+	// Verify VLESS REALITY + xtls-rprx-vision + gRPC + Clash YAML
+	var rawPbk [32]byte
+	for i := range rawPbk {
+		rawPbk[i] = byte(i + 1)
+	}
+	pbkStr := base64.RawURLEncoding.EncodeToString(rawPbk[:])
+	realityURI := "vless://e947d49f-e235-4e89-9411-5df3ff17acc3@198.51.100.10:443?security=reality&encryption=none&pbk=" + pbkStr + "&fp=chrome&type=tcp&flow=xtls-rprx-vision&sni=www.microsoft.com&sid=01ab#RealityVision"
+	rNode, rOk := ParseSingleShareLink(realityURI)
+	if !rOk || rNode.Security != "reality" || rNode.Flow != "xtls-rprx-vision" || rNode.RealityShortID != "01ab" {
+		t.Fatalf("expected REALITY+Vision link to parse cleanly, got ok=%v node=%+v", rOk, rNode)
+	}
+
+	grpcURI := "vless://e947d49f-e235-4e89-9411-5df3ff17acc3@cdn.example.com:443?security=tls&type=grpc&serviceName=myGunSvc&sni=cdn.example.com#GRPCNode"
+	gNode, gOk := ParseSingleShareLink(grpcURI)
+	if !gOk || gNode.Transport != "grpc" || gNode.ServiceName != "myGunSvc" {
+		t.Fatalf("expected gRPC link to parse cleanly, got ok=%v node=%+v", gOk, gNode)
+	}
+
+	clashYAML := `
+proxies:
+  - {name: "TR-XHTTP", type: vless, server: t.gptban.com, port: 443, uuid: e947d49f-e235-4e89-9411-5df3ff17acc3, tls: true, network: xhttp, servername: t.gptban.com}
+  - name: "DE-Trojan"
+    type: trojan
+    server: de.example.com
+    port: 443
+    password: secret123
+    network: ws
+`
+	clashNodes := ParseShareLinksWithSource(clashYAML, "ClashSub")
+	if len(clashNodes) != 2 || clashNodes[0].Transport != "xhttp" || clashNodes[1].Protocol != ProtoTrojan {
+		t.Fatalf("expected 2 Clash YAML proxies parsed, got %+v", clashNodes)
+	}
+}
+
+func TestVLESSXHTTPLoopbackPacketUpAndStreamOne(t *testing.T) {
+	type sessionPipe struct {
+		upR   *io.PipeReader
+		upW   *io.PipeWriter
+		ready chan struct{}
+	}
+	var sessMu sync.Mutex
+	sessions := make(map[string]*sessionPipe)
+	getSession := func(id string) *sessionPipe {
+		sessMu.Lock()
+		defer sessMu.Unlock()
+		sp, ok := sessions[id]
+		if !ok {
+			r, w := io.Pipe()
+			sp = &sessionPipe{upR: r, upW: w, ready: make(chan struct{})}
+			sessions[id] = sp
+		}
+		return sp
+	}
+
+	readVLESSAndEcho := func(r io.Reader, w io.Writer, flush func()) {
+		var hdr [21]byte
+		if _, err := io.ReadFull(r, hdr[:]); err != nil {
+			return
+		}
+		var atyp [1]byte
+		if _, err := io.ReadFull(r, atyp[:]); err != nil {
+			return
+		}
+		switch atyp[0] {
+		case 0x01:
+			_, _ = io.CopyN(io.Discard, r, 4)
+		case 0x02:
+			var l [1]byte
+			_, _ = io.ReadFull(r, l[:])
+			_, _ = io.CopyN(io.Discard, r, int64(l[0]))
+		case 0x03:
+			_, _ = io.CopyN(io.Discard, r, 16)
+		}
+		var msg [4]byte
+		if _, err := io.ReadFull(r, msg[:]); err != nil {
+			return
+		}
+		// VLESS v0 response header [0x00, 0x00] + echoed payload
+		_, _ = w.Write(append([]byte{0x00, 0x00}, []byte("PONG:"+string(msg[:]))...))
+		if flush != nil {
+			flush()
+		}
+	}
+
+	ts := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.RawQuery != "ed=2056" {
+			http.Error(w, "missing query ed=2056", http.StatusBadRequest)
+			return
+		}
+		if !strings.Contains(r.Header.Get("Referer"), "x_padding=") {
+			http.Error(w, "missing x_padding Referer", http.StatusBadRequest)
+			return
+		}
+		flusher, _ := w.(http.Flusher)
+		flushFn := func() {
+			if flusher != nil {
+				flusher.Flush()
+			}
+		}
+
+		// stream-one: POST /dl
+		if r.Method == http.MethodPost && r.URL.Path == "/dl" {
+			w.Header().Set("X-Accel-Buffering", "no")
+			w.WriteHeader(http.StatusOK)
+			flushFn()
+			readVLESSAndEcho(r.Body, w, flushFn)
+			return
+		}
+
+		// packet-up: GET /dl/{session} and POST /dl/{session}/{seq}
+		parts := strings.Split(strings.Trim(r.URL.Path, "/"), "/")
+		if len(parts) == 2 && parts[0] == "dl" && r.Method == http.MethodGet {
+			sp := getSession(parts[1])
+			w.Header().Set("X-Accel-Buffering", "no")
+			w.WriteHeader(http.StatusOK)
+			flushFn()
+			readVLESSAndEcho(sp.upR, w, flushFn)
+			return
+		}
+		if len(parts) == 3 && parts[0] == "dl" && r.Method == http.MethodPost {
+			sp := getSession(parts[1])
+			data, _ := io.ReadAll(r.Body)
+			_, _ = sp.upW.Write(data)
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer ts.Close()
+
+	srvURL, _ := url.Parse(ts.URL)
+	host, port, _ := net.SplitHostPort(srvURL.Host)
+	doh := NewDoHResolver()
+
+	for _, mode := range []string{"auto", "stream-one"} {
+		uri := "vless://e947d49f-e235-4e89-9411-5df3ff17acc3@" + host + ":" + port +
+			"?mode=" + mode + "&path=%2Fdl%3Fed%3D2056&security=tls&encryption=none&host=t.gptban.com&fp=chrome&type=xhttp&allowInsecure=1&sni=t.gptban.com#Test-" + mode
+		node, ok := ParseSingleShareLink(uri)
+		if !ok {
+			t.Fatalf("parse failed for mode=%s", mode)
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		conn, err := DialOutboundNode(ctx, doh, node, "example.com", "443")
+		if err != nil {
+			cancel()
+			t.Fatalf("DialOutboundNode xhttp mode=%s failed: %v", mode, err)
+		}
+		if _, err := conn.Write([]byte("PING")); err != nil {
+			_ = conn.Close()
+			cancel()
+			t.Fatalf("write over xhttp mode=%s failed: %v", mode, err)
+		}
+		reply := make([]byte, 9)
+		if _, err := io.ReadFull(conn, reply); err != nil {
+			_ = conn.Close()
+			cancel()
+			t.Fatalf("read over xhttp mode=%s failed: %v", mode, err)
+		}
+		_ = conn.Close()
+		cancel()
+		if string(reply) != "PONG:PING" {
+			t.Fatalf("unexpected xhttp mode=%s reply: %q", mode, string(reply))
+		}
+	}
+}
+
+func TestFiftyLiveSourcesAndPeriodicAutoRetest(t *testing.T) {
+	if len(defaultFeedSources) < 50 {
+		t.Fatalf("expected at least 50 reputable live proxy sources, got %d", len(defaultFeedSources))
+	}
+	seenName := make(map[string]bool)
+	for _, fs := range defaultFeedSources {
+		if fs.Name == "" || seenName[fs.Name] || len(fs.Mirrors) == 0 {
+			t.Fatalf("invalid or duplicate feed source: %+v", fs)
+		}
+		seenName[fs.Name] = true
+	}
+
+	doh := NewDoHResolver()
+	pool := NewNodePool(doh, t.TempDir())
+	slowNode, _ := ParseSingleShareLink("vless://e947d49f-e235-4e89-9411-5df3ff17acc3@198.51.100.11:443?security=tls&type=ws&sni=slow.example.com#SlowServer")
+	fastNode, _ := ParseSingleShareLink("vless://e947d49f-e235-4e89-9411-5df3ff17acc3@198.51.100.12:443?security=tls&type=xhttp&path=%2Fdl&sni=fast.example.com#UltraFastXHTTP")
+
+	pool.AddStaticTestNode(slowNode, 180)
+	pool.mu.Lock()
+	pool.feedPool = []OutboundNode{fastNode}
+	pool.probeHook = func(n OutboundNode) (int64, int64, bool) {
+		if n.Host == "198.51.100.12" {
+			return 22, 42000, true
+		}
+		return 190, 2500, true
+	}
+	pool.mu.Unlock()
+
+	router := NewUpstreamRouter(doh, RuntimeConfig{Mode: ModeAntiDPI})
+	gw := NewGatewayServer(router, doh, pool, nil)
+	mux := NewControlMux(gw, router, doh, "")
+
+	codeRetest, rawRetest := InvokeControlHandlerInMemory(mux, http.MethodPost, "/retest", "")
+	if codeRetest != http.StatusOK {
+		t.Fatalf("expected 200 OK from /retest, got %d: %s", codeRetest, rawRetest)
+	}
+	var rt SwitchBestResult
+	if err := json.Unmarshal([]byte(rawRetest), &rt); err != nil {
+		t.Fatalf("unmarshal /retest: %v", err)
+	}
+	if !rt.OK || rt.BestNode != "UltraFastXHTTP" || rt.BestRTTMs != 22 {
+		t.Fatalf("expected RunAutoRetest to promote UltraFastXHTTP (22ms), got %+v", rt)
+	}
+
+	codeLC, _ := InvokeControlHandlerInMemory(mux, http.MethodPost, "/lifecycle?foreground=0", "")
+	if codeLC != http.StatusOK || pool.inForeground.Load() {
+		t.Fatalf("expected /lifecycle?foreground=0 to pause background probing")
+	}
+}
+
 
 

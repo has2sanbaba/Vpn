@@ -1036,7 +1036,6 @@ class DownloadEngine private constructor(private val appContext: Context) {
         fun extensionForMime(mime: String): String {
             val m = mime.lowercase(Locale.ENGLISH).trim()
             return when (m) {
-                "application/vnd.android.package-archive" -> "apk"
                 "video/mp4", "application/vnd.apple.mpegurl", "application/x-mpegurl" -> "mp4"
                 "video/mp2t" -> "ts"
                 "video/webm" -> "webm"
@@ -1060,7 +1059,7 @@ class DownloadEngine private constructor(private val appContext: Context) {
         fun resolveMimeForFileName(fileName: String, fallbackMime: String?): String {
             val ext = fileName.substringAfterLast('.', "").lowercase(Locale.ENGLISH)
             val byExt = when (ext) {
-                "apk" -> "application/vnd.android.package-archive"
+                "apk" -> "application/octet-stream"
                 "mp4", "m4v" -> "video/mp4"
                 "ts" -> "video/mp2t"
                 "mkv" -> "video/x-matroska"
