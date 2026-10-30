@@ -173,9 +173,9 @@ dependencies {
     implementation("androidx.webkit:webkit:1.12.1")
     implementation("com.google.android.material:material:1.12.0")
 
-    // Dependency injection (Dagger 2 — zero reflection at runtime)
-    implementation("com.google.dagger:dagger:2.52")
-    kapt("com.google.dagger:dagger-compiler:2.52")
+    // Dependency injection (Dagger 2.56.2 — supports Kotlin 2.1.20 metadata, zero reflection at runtime)
+    implementation("com.google.dagger:dagger:2.56.2")
+    kapt("com.google.dagger:dagger-compiler:2.56.2")
     implementation("javax.inject:javax.inject:1")
     compileOnly("javax.annotation:jsr250-api:1.0")
 
