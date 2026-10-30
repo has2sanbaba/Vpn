@@ -181,7 +181,7 @@ jobs:
           if [[ -n "$AAPT2" && -x "$AAPT2" ]]; then
             "$AAPT2" dump badging "$UNIV" > badging.txt
             grep -E "package:|sdkVersion:|targetSdkVersion:|native-code:|uses-permission:" badging.txt || true
-            if grep -Eq "REQUEST_INSTALL_PACKAGES|READ_EXTERNAL_STORAGE|QUERY_ALL_PACKAGES" badging.txt; then
+            if grep -Eq "REQUEST_INSTALL_PACKAGES|QUERY_ALL_PACKAGES|BIND_ACCESSIBILITY_SERVICE|SYSTEM_ALERT_WINDOW|READ_SMS|RECEIVE_SMS" badging.txt; then
               echo "::error title=PlayProtectViolation::Forbidden high-risk permission detected in merged APK manifest!"
               cat badging.txt
               exit 1
