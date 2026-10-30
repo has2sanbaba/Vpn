@@ -36,6 +36,7 @@ data class DownloadRecord(
     val id: String = UUID.randomUUID().toString(),
     val fileName: String,
     val url: String,
+    val secondaryAudioUrl: String = "",
     val mimeType: String,
     val bytesRead: Long = 0L,
     val totalBytes: Long = -1L,
@@ -367,6 +368,7 @@ class BrowserDataStore private constructor(context: Context) {
                             id = o.optString("id", UUID.randomUUID().toString()),
                             fileName = o.optString("fileName", "download"),
                             url = o.optString("url", ""),
+                            secondaryAudioUrl = o.optString("secondaryAudioUrl", ""),
                             mimeType = o.optString("mimeType", "application/octet-stream"),
                             bytesRead = o.optLong("bytesRead", 0L),
                             totalBytes = o.optLong("totalBytes", -1L),
@@ -428,6 +430,7 @@ class BrowserDataStore private constructor(context: Context) {
                     put("id", d.id)
                     put("fileName", d.fileName)
                     put("url", d.url)
+                    put("secondaryAudioUrl", d.secondaryAudioUrl)
                     put("mimeType", d.mimeType)
                     put("bytesRead", d.bytesRead)
                     put("totalBytes", d.totalBytes)

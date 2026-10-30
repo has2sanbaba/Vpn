@@ -34,6 +34,7 @@ import androidx.palette.graphics.Palette
 import io.reactivex.rxjava3.core.Scheduler
 import io.reactivex.rxjava3.subjects.BehaviorSubject
 import io.reactivex.rxjava3.subjects.PublishSubject
+import org.greatfire.browser.media.WebViewMediaInspector
 import javax.inject.Inject
 
 /**
@@ -135,10 +136,12 @@ class TabWebChromeClient @Inject constructor(
 
     override fun onProgressChanged(view: WebView, newProgress: Int) {
         progressObservable.onNext(newProgress)
+        WebViewMediaInspector.onProgressChanged(view, newProgress)
     }
 
     override fun onReceivedTitle(view: WebView, title: String) {
         titleObservable.onNext(title)
+        WebViewMediaInspector.onReceivedTitle(view, title)
         faviconObservable.onNext(Option.None)
         generateColorAndPropagate(null)
     }

@@ -41,7 +41,7 @@ func ghMirrors(ownerRepo, branch, path string) []string {
 	}
 }
 
-const autoRetestInterval = 3 * time.Minute
+const autoRetestInterval = 10 * time.Minute
 
 // 50 verified, actively updated (Oct 2026) reputable multi-protocol proxy sources on GitHub
 // (VLESS XHTTP/Reality/WS/gRPC/TCP, VMess, Trojan, Shadowsocks, Base64 & raw subscriptions).
@@ -118,18 +118,28 @@ type NodeSummaryItem struct {
 	Custom    bool   `json:"custom"`
 }
 
+type SuggestedUpgradeInfo struct {
+	ID        string `json:"id"`
+	Name      string `json:"name"`
+	Source    string `json:"source"`
+	Protocol  string `json:"protocol"`
+	RTTMs     int64  `json:"rtt_ms"`
+	SpeedKbps int64  `json:"speed_kbps"`
+}
+
 type SwitchBestResult struct {
-	OK            bool   `json:"ok"`
-	SwitchedFrom  string `json:"switched_from,omitempty"`
-	BestID        string `json:"best_id,omitempty"`
-	BestNode      string `json:"best_node,omitempty"`
-	BestSource    string `json:"best_source,omitempty"`
-	BestProto     string `json:"best_proto,omitempty"`
-	BestRTTMs     int64  `json:"best_rtt_ms,omitempty"`
-	BestSpeedKbps int64  `json:"best_speed_kbps,omitempty"`
-	ReadyNodes    int    `json:"ready_nodes"`
-	ActiveSources int    `json:"active_sources"`
-	Error         string `json:"error,omitempty"`
+	OK            bool                  `json:"ok"`
+	SwitchedFrom  string                `json:"switched_from,omitempty"`
+	BestID        string                `json:"best_id,omitempty"`
+	BestNode      string                `json:"best_node,omitempty"`
+	BestSource    string                `json:"best_source,omitempty"`
+	BestProto     string                `json:"best_proto,omitempty"`
+	BestRTTMs     int64                 `json:"best_rtt_ms,omitempty"`
+	BestSpeedKbps int64                 `json:"best_speed_kbps,omitempty"`
+	ReadyNodes    int                   `json:"ready_nodes"`
+	ActiveSources int                   `json:"active_sources"`
+	Suggested     *SuggestedUpgradeInfo `json:"suggested,omitempty"`
+	Error         string                `json:"error,omitempty"`
 }
 
 type CustomAddResult struct {
@@ -206,30 +216,33 @@ type NodePool struct {
 	cachePath       string
 	customStorePath string
 
-	mu            sync.RWMutex
-	ready         []scoredNode
-	feedPool      []OutboundNode
-	customNodes   []OutboundNode
-	customSubs    []string
-	pinnedID      string
-	excludedUntil map[string]time.Time
-	customNode    *OutboundNode
+	mu               sync.RWMutex
+	ready            []scoredNode
+	feedPool         []OutboundNode
+	customNodes      []OutboundNode
+	customSubs       []string
+	pinnedID         string
+	excludedUntil    map[string]time.Time
+	customNode       *OutboundNode
+	suggested        *SuggestedUpgradeInfo
+	dismissedSuggest map[string]bool
 
 	// Custom probe hook for deterministic unit tests; nil in production
 	probeHook     func(node OutboundNode) (rttMs int64, speedKbps int64, ok bool)
 	onBestChanged func()
 
-	firstReadyOnce   sync.Once
-	firstReadyCh     chan struct{}
-	refreshing       atomic.Bool
-	retesting        atomic.Bool
-	inForeground     atomic.Bool
-	reachableSources atomic.Int32
-	lastRetestUnix   atomic.Int64
-	nextRetestUnix   atomic.Int64
-	retestCount      atomic.Uint64
-	retestSweepIdx   atomic.Uint32
-	stopCh           chan struct{}
+	firstReadyOnce     sync.Once
+	firstReadyCh       chan struct{}
+	startupSelectPhase atomic.Bool
+	refreshing         atomic.Bool
+	retesting          atomic.Bool
+	inForeground       atomic.Bool
+	reachableSources   atomic.Int32
+	lastRetestUnix     atomic.Int64
+	nextRetestUnix     atomic.Int64
+	retestCount        atomic.Uint64
+	retestSweepIdx     atomic.Uint32
+	stopCh             chan struct{}
 }
 
 func NewNodePool(doh *DoHResolver, dataDir string) *NodePool {
@@ -240,12 +253,13 @@ func NewNodePool(doh *DoHResolver, dataDir string) *NodePool {
 		customPath = filepath.Join(dataDir, "custom_configs.json")
 	}
 	p := &NodePool{
-		doh:             doh,
-		cachePath:       cachePath,
-		customStorePath: customPath,
-		excludedUntil:   make(map[string]time.Time),
-		firstReadyCh:    make(chan struct{}),
-		stopCh:          make(chan struct{}),
+		doh:              doh,
+		cachePath:        cachePath,
+		customStorePath:  customPath,
+		excludedUntil:    make(map[string]time.Time),
+		dismissedSuggest: make(map[string]bool),
+		firstReadyCh:     make(chan struct{}),
+		stopCh:           make(chan struct{}),
 	}
 	p.inForeground.Store(true)
 	p.nextRetestUnix.Store(time.Now().Add(autoRetestInterval).Unix())
@@ -429,8 +443,16 @@ func (p *NodePool) sortReadyLocked() {
 }
 
 // StartBackground launches BOTH multi-source seed probing AND 50-source live feed fetching
-// simultaneously at t=0ms, then automatically re-tests and promotes the fastest proxy every 3 minutes.
+// simultaneously at t=0ms, locks onto a fast verified server at startup so the user's exit IP
+// never silently changes mid-session, and only notifies the user if a much faster server is found later.
 func (p *NodePool) StartBackground() {
+	p.mu.RLock()
+	hasExplicitPin := p.pinnedID != ""
+	p.mu.RUnlock()
+	if !hasExplicitPin {
+		p.startupSelectPhase.Store(true)
+	}
+
 	p.RefreshFromFeedsAsync()
 
 	go func() {
@@ -459,6 +481,15 @@ func (p *NodePool) StartBackground() {
 		}
 
 		p.probeCandidatesConcurrent(existing, 20, 16)
+		p.startupSelectPhase.Store(false)
+		p.mu.Lock()
+		p.sortReadyLocked()
+		if p.pinnedID == "" && len(p.ready) > 0 {
+			p.pinnedID = p.ready[0].Node.ID
+		}
+		p.suggested = nil
+		p.mu.Unlock()
+
 		p.lastRetestUnix.Store(time.Now().Unix())
 		p.nextRetestUnix.Store(time.Now().Add(autoRetestInterval).Unix())
 
@@ -478,10 +509,11 @@ func (p *NodePool) StartBackground() {
 				if !p.inForeground.Load() {
 					continue
 				}
-				if cycle%4 == 0 || p.ReadyCount() < 8 || p.ActiveSourcesCount() < 5 {
+				if cycle%3 == 0 || p.ReadyCount() < 8 || p.ActiveSourcesCount() < 5 {
 					p.RefreshFromFeedsAsync()
 				}
 				ctx, cancel := context.WithTimeout(context.Background(), 6500*time.Millisecond)
+				// Background check NEVER auto-switches active proxy; only suggests if a much better server exists!
 				_ = p.RunAutoRetest(ctx)
 				cancel()
 			case <-p.stopCh:
@@ -491,9 +523,20 @@ func (p *NodePool) StartBackground() {
 	}()
 }
 
-// RunAutoRetest benchmarks currently active nodes plus fresh candidates from the 50-source pool,
-// evicts dead/slow servers, and hot-swaps to any faster server without interrupting open streams.
+// RunAutoRetest benchmarks active + candidate servers in the background WITHOUT changing the user's
+// locked active proxy (keeping exit IP 100% stable for websites & downloads). If a significantly
+// faster proxy is discovered, it populates SuggestedUpgradeInfo so the UI can ask the user.
 func (p *NodePool) RunAutoRetest(ctx context.Context) SwitchBestResult {
+	return p.runRetestInternal(ctx, false)
+}
+
+// RunManualRetestAndPromote is triggered ONLY when the user explicitly clicks the speed-test &
+// connect-fastest button in the Proxy sheet.
+func (p *NodePool) RunManualRetestAndPromote(ctx context.Context) SwitchBestResult {
+	return p.runRetestInternal(ctx, true)
+}
+
+func (p *NodePool) runRetestInternal(ctx context.Context, applyFastest bool) SwitchBestResult {
 	if !p.retesting.CompareAndSwap(false, true) {
 		name, src, proto, rtt, spd, cnt, actSrc := p.BestNodeSummary()
 		return SwitchBestResult{
@@ -505,16 +548,21 @@ func (p *NodePool) RunAutoRetest(ctx context.Context) SwitchBestResult {
 			BestSpeedKbps: spd,
 			ReadyNodes:    cnt,
 			ActiveSources: actSrc,
+			Suggested:     p.GetSuggestedUpgrade(),
 		}
 	}
 	defer p.retesting.Store(false)
 
-	p.mu.RLock()
+	p.mu.Lock()
 	var prevTopID, prevTopName string
 	if len(p.ready) > 0 {
 		prevTopID = p.ready[0].Node.ID
 		prevTopName = p.ready[0].Node.Name
+		if !applyFastest && p.pinnedID == "" {
+			p.pinnedID = prevTopID
+		}
 	}
+	lockedID := p.pinnedID
 	seen := make(map[string]bool, 40)
 	candidates := make([]OutboundNode, 0, 34)
 	for i := 0; i < len(p.ready) && len(candidates) < 14; i++ {
@@ -539,14 +587,13 @@ func (p *NodePool) RunAutoRetest(ctx context.Context) SwitchBestResult {
 		readyIDs[s.Node.ID] = true
 	}
 	onChanged := p.onBestChanged
-	p.mu.RUnlock()
+	p.mu.Unlock()
 
 	if len(candidates) == 0 {
 		p.RefreshFromFeedsAsync()
 		return SwitchBestResult{OK: false, Error: "در حال دریافت لیست سرورها از ۵۰ منبع زنده..."}
 	}
 
-	// Probe in parallel with 14 lightweight workers and track failures on existing ready nodes
 	workers := 14
 	if workers > len(candidates) {
 		workers = len(candidates)
@@ -569,7 +616,8 @@ func (p *NodePool) RunAutoRetest(ctx context.Context) SwitchBestResult {
 				rtt, kbps, ok := p.evaluateNode(ctx, node)
 				if ok {
 					p.upsertVerifiedNode(node, rtt, kbps)
-				} else if readyIDs[node.ID] {
+				} else if readyIDs[node.ID] && node.ID != lockedID {
+					// Never evict the user's locked active server from a single background probe timeout!
 					p.RecordFailure(node.ID)
 				}
 			}
@@ -580,25 +628,33 @@ func (p *NodePool) RunAutoRetest(ctx context.Context) SwitchBestResult {
 	p.lastRetestUnix.Store(time.Now().Unix())
 	p.nextRetestUnix.Store(time.Now().Add(autoRetestInterval).Unix())
 	p.retestCount.Add(1)
-	p.saveCachedNodes()
 
 	p.mu.Lock()
-	// Allow faster auto-discovered server to win unless user explicitly pinned a custom node
-	if p.pinnedID != "" {
-		isCustomPinned := false
-		for _, cn := range p.customNodes {
-			if cn.ID == p.pinnedID {
-				isCustomPinned = true
-				break
-			}
+	if applyFastest {
+		// Explicit manual action by user -> pick fastest server and lock onto it!
+		p.pinnedID = ""
+		p.sortReadyLocked()
+		if len(p.ready) > 0 {
+			p.pinnedID = p.ready[0].Node.ID
 		}
-		if !isCustomPinned {
-			p.pinnedID = ""
+		p.suggested = nil
+	} else {
+		// Sticky mode: keep p.pinnedID locked! If none was locked yet, lock current top.
+		p.sortReadyLocked()
+		if p.pinnedID == "" && len(p.ready) > 0 {
+			p.pinnedID = p.ready[0].Node.ID
+			p.sortReadyLocked()
 		}
+		p.evaluateUpgradeSuggestionLocked()
 	}
-	p.sortReadyLocked()
+
 	var res SwitchBestResult
 	var newTopID string
+	var sugCopy *SuggestedUpgradeInfo
+	if p.suggested != nil {
+		cp := *p.suggested
+		sugCopy = &cp
+	}
 	if len(p.ready) > 0 {
 		top := p.ready[0]
 		newTopID = top.Node.ID
@@ -612,15 +668,93 @@ func (p *NodePool) RunAutoRetest(ctx context.Context) SwitchBestResult {
 			BestRTTMs:     top.AvgRTTMs,
 			BestSpeedKbps: top.SpeedKbps,
 			ReadyNodes:    len(p.ready),
+			Suggested:     sugCopy,
 		}
 	}
 	p.mu.Unlock()
+
+	p.saveCachedNodes()
 	res.ActiveSources = p.ActiveSourcesCount()
 
-	if newTopID != "" && newTopID != prevTopID && onChanged != nil {
+	if applyFastest && newTopID != "" && newTopID != prevTopID && onChanged != nil {
 		onChanged()
 	}
 	return res
+}
+
+func (p *NodePool) evaluateUpgradeSuggestionLocked() {
+	if p.customNode != nil || len(p.ready) < 2 {
+		p.suggested = nil
+		return
+	}
+	active := p.ready[0]
+	actScore := active.ScoreMs
+	if actScore <= 0 {
+		actScore = computeEffectiveScore(active.AvgRTTMs, active.SpeedKbps)
+	}
+	var bestCand *scoredNode
+	var bestCandScore int64
+	for i := 1; i < len(p.ready); i++ {
+		c := &p.ready[i]
+		if !p.excludedUntil[c.Node.ID].IsZero() || p.dismissedSuggest[c.Node.ID] {
+			continue
+		}
+		if c.ConsecFailures > 0 {
+			continue
+		}
+		sc := c.ScoreMs
+		if sc <= 0 {
+			sc = computeEffectiveScore(c.AvgRTTMs, c.SpeedKbps)
+		}
+		if bestCand == nil || sc < bestCandScore {
+			bestCand = c
+			bestCandScore = sc
+		}
+	}
+	if bestCand == nil {
+		p.suggested = nil
+		return
+	}
+	rttGain := active.AvgRTTMs - bestCand.AvgRTTMs
+	if rttGain < 55 || bestCandScore*100 > actScore*72 {
+		if p.suggested != nil && p.suggested.ID == active.Node.ID {
+			p.suggested = nil
+		}
+		return
+	}
+	p.suggested = &SuggestedUpgradeInfo{
+		ID:        bestCand.Node.ID,
+		Name:      bestCand.Node.Name,
+		Source:    firstNonEmpty(bestCand.Node.Source, inferSourceFromRemarkOrDefault(bestCand.Node.Name, "Global")),
+		Protocol:  strings.ToUpper(string(bestCand.Node.Protocol)),
+		RTTMs:     bestCand.AvgRTTMs,
+		SpeedKbps: bestCand.SpeedKbps,
+	}
+}
+
+func (p *NodePool) GetSuggestedUpgrade() *SuggestedUpgradeInfo {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	if p.suggested == nil {
+		return nil
+	}
+	cp := *p.suggested
+	return &cp
+}
+
+func (p *NodePool) DismissSuggestedUpgrade(nodeID string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	id := strings.TrimSpace(nodeID)
+	if id == "" && p.suggested != nil {
+		id = p.suggested.ID
+	}
+	if id != "" {
+		p.dismissedSuggest[id] = true
+	}
+	if p.suggested != nil && (id == "" || p.suggested.ID == id) {
+		p.suggested = nil
+	}
 }
 
 func (p *NodePool) Close() {
@@ -1134,7 +1268,9 @@ func (p *NodePool) SelectNodeByID(nodeID string) (SwitchBestResult, bool) {
 	}
 	p.customNode = nil
 	delete(p.excludedUntil, nodeID)
+	delete(p.dismissedSuggest, nodeID)
 	p.pinnedID = nodeID
+	p.suggested = nil
 	p.sortReadyLocked()
 	top := p.ready[0]
 	cnt := len(p.ready)
@@ -1250,6 +1386,7 @@ func (p *NodePool) SwitchToBestDifferentNode(ctx context.Context) SwitchBestResu
 	}
 	chosen := p.ready[chosenIdx]
 	p.pinnedID = chosen.Node.ID
+	p.suggested = nil
 	p.sortReadyLocked()
 	cnt := len(p.ready)
 	p.mu.Unlock()
@@ -1282,8 +1419,13 @@ func (p *NodePool) PickNodes(ctx context.Context, maxNodes int, coldWait time.Du
 		timer.Stop()
 	}
 
-	p.mu.RLock()
-	defer p.mu.RUnlock()
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	if p.customNode == nil && p.pinnedID == "" && !p.startupSelectPhase.Load() && len(p.ready) > 0 {
+		// Pin the active server on first real traffic selection so the user's exit IP never shifts mid-session!
+		p.pinnedID = p.ready[0].Node.ID
+	}
 
 	var out []OutboundNode
 	seen := make(map[string]bool)
@@ -1329,19 +1471,30 @@ func (p *NodePool) RecordFailure(nodeID string) {
 	for i := range p.ready {
 		if p.ready[i].Node.ID == nodeID {
 			p.ready[i].ConsecFailures++
-			p.ready[i].AvgRTTMs += 600
-			p.ready[i].ScoreMs = computeEffectiveScore(p.ready[i].AvgRTTMs, p.ready[i].SpeedKbps)
-			if p.pinnedID == nodeID && p.ready[i].ConsecFailures >= 2 {
-				p.pinnedID = ""
+			isLocked := p.pinnedID == nodeID
+			evictThreshold := 2
+			if isLocked {
+				// Keep active server sticky through transient blips; failover only if truly dead (4 failures)
+				evictThreshold = 4
 			}
-			if p.ready[i].ConsecFailures >= 2 {
+			p.ready[i].AvgRTTMs += 400
+			p.ready[i].ScoreMs = computeEffectiveScore(p.ready[i].AvgRTTMs, p.ready[i].SpeedKbps)
+			if p.ready[i].ConsecFailures >= evictThreshold {
 				p.ready = append(p.ready[:i], p.ready[i+1:]...)
+				if isLocked {
+					p.pinnedID = ""
+					p.sortReadyLocked()
+					if len(p.ready) > 0 {
+						p.pinnedID = p.ready[0].Node.ID
+					}
+				}
 				if len(p.ready) < 5 {
 					needRefresh = true
 				}
 			} else {
 				p.sortReadyLocked()
 			}
+			p.evaluateUpgradeSuggestionLocked()
 			break
 		}
 	}
@@ -1388,6 +1541,9 @@ func (p *NodePool) upsertVerifiedNode(node OutboundNode, rttMs int64, speedKbps 
 	p.sortReadyLocked()
 	if len(p.ready) > 28 {
 		p.ready = p.ready[:28]
+	}
+	if !p.startupSelectPhase.Load() && p.pinnedID != "" {
+		p.evaluateUpgradeSuggestionLocked()
 	}
 	p.mu.Unlock()
 

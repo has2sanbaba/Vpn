@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"math/rand"
 	"net"
 	"os"
 	"path/filepath"
@@ -251,12 +250,12 @@ func (cr *ConnectionRacer) ConnectAndVerify(
 	savedMethod := cr.methodData[etld]
 	cr.mu.RUnlock()
 
-	preferTunnel := knownBlocked || (savedMethod == MethodTunnel && rand.Float64() < 0.92)
+	preferTunnel := knownBlocked || savedMethod == MethodTunnel
 
-	// Fetch up to 2 distinct verified fast upstream nodes
+	// Fetch locked active node (+ 1 backup node used ONLY if the primary node fails completely,
+	// never raced in parallel, so the user's exit IP stays 100% consistent across all requests!).
 	coldWait := time.Duration(0)
 	if preferTunnel && cr.pool.ReadyCount() == 0 {
-		// On very first millisecond of cold app launch, wait up to 2.2s for the fastest of 20 workers
 		coldWait = 2200 * time.Millisecond
 	}
 	nodes := cr.pool.PickNodes(ctx, 2, coldWait)
@@ -268,29 +267,29 @@ func (cr *ConnectionRacer) ConnectAndVerify(
 				cr.TunnelWins.Add(1)
 				return c, nil
 			}
+			if len(nodes) > 1 {
+				if c, err := DialOutboundNode(ctx, cr.router.doh, nodes[1], host, port); err == nil {
+					cr.TunnelWins.Add(1)
+					return c, nil
+				}
+			}
 		}
 		return cr.router.dialAntiDPI(ctx, cfg, host, port)
 	}
 
-	// Build staggered parallel Happy-Eyeballs circumvention plan (GreatFire FreeBrowser pattern)
+	// Build circumvention plan using ONLY the locked primary tunnel node (nodes[0]) so exit IP never splits
 	var legs []legSpec
 	if preferTunnel && len(nodes) > 0 {
 		n0 := nodes[0]
 		legs = append(legs, legSpec{kind: MethodTunnel, delay: 0, node: &n0})
-		legs = append(legs, legSpec{kind: MethodDirectDPI, delay: 160 * time.Millisecond})
-		if len(nodes) > 1 {
-			n1 := nodes[1]
-			legs = append(legs, legSpec{kind: MethodTunnel, delay: 650 * time.Millisecond, node: &n1})
+		if !knownBlocked {
+			legs = append(legs, legSpec{kind: MethodDirectDPI, delay: 900 * time.Millisecond})
 		}
 	} else {
 		legs = append(legs, legSpec{kind: MethodDirectDPI, delay: 0})
 		if len(nodes) > 0 {
 			n0 := nodes[0]
-			legs = append(legs, legSpec{kind: MethodTunnel, delay: 300 * time.Millisecond, node: &n0})
-		}
-		if len(nodes) > 1 {
-			n1 := nodes[1]
-			legs = append(legs, legSpec{kind: MethodTunnel, delay: 950 * time.Millisecond, node: &n1})
+			legs = append(legs, legSpec{kind: MethodTunnel, delay: 320 * time.Millisecond, node: &n0})
 		}
 	}
 
@@ -372,6 +371,17 @@ func (cr *ConnectionRacer) ConnectAndVerify(
 		}
 		cr.recordWinningMethod(etld, winner.kind)
 		return winner.conn, nil
+	}
+
+	// Sequential failover ONLY when the locked primary node (nodes[0]) failed completely
+	if len(nodes) > 1 && ctx.Err() == nil {
+		n1 := nodes[1]
+		if conn, rttMs, err := cr.runSingleLeg(ctx, cfg, legSpec{kind: MethodTunnel, node: &n1}, host, port, initialPayload); err == nil && conn != nil {
+			cr.TunnelWins.Add(1)
+			cr.pool.RecordSuccess(n1.ID, rttMs)
+			cr.recordWinningMethod(etld, MethodTunnel)
+			return conn, nil
+		}
 	}
 
 	if lastErr == nil {

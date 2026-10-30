@@ -15,11 +15,11 @@ import android.webkit.URLUtil
 import androidx.core.content.ContextCompat
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.ensureActive
@@ -41,9 +41,9 @@ import java.io.File
 import java.io.FileOutputStream
 import java.io.RandomAccessFile
 import java.net.URLDecoder
-import java.nio.ByteBuffer
 import java.util.Locale
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicLong
 import kotlin.coroutines.coroutineContext
 
@@ -63,7 +63,19 @@ class DownloadEngine private constructor(private val appContext: Context) {
 
     init {
         dataStore.recoverInterruptedDownloadsOnStartup()
+        reconcilePausedProgressOnStartup()
         refreshSnapshot()
+    }
+
+    private fun reconcilePausedProgressOnStartup() {
+        for (rec in dataStore.getDownloads()) {
+            if (rec.state == DownloadState.PAUSED && rec.stagingPath.isNotBlank()) {
+                val diskBytes = computePersistedBytesForStaging(File(rec.stagingPath))
+                if (diskBytes > 0L && diskBytes != rec.bytesRead) {
+                    dataStore.upsertDownload(rec.copy(bytesRead = diskBytes))
+                }
+            }
+        }
     }
 
     fun refreshSnapshot() {
@@ -76,7 +88,8 @@ class DownloadEngine private constructor(private val appContext: Context) {
         contentDisposition: String = "",
         mimeType: String = "",
         refererUrl: String = "",
-        suggestedFileNameOverride: String = ""
+        suggestedFileNameOverride: String = "",
+        secondaryAudioUrl: String = ""
     ): DownloadRecord? {
         val trimmed = url.trim()
         if (trimmed.isEmpty()) return null
@@ -87,7 +100,7 @@ class DownloadEngine private constructor(private val appContext: Context) {
         }
 
         val initialMime = cleanMimeOrNull(mimeType)
-        val isHlsRequest = isHlsUrlOrMime(trimmed, initialMime)
+        val isHlsRequest = isHlsUrlOrMime(trimmed, initialMime) || secondaryAudioUrl.isNotBlank()
         val rawDesiredName = when {
             suggestedFileNameOverride.isNotBlank() -> suggestedFileNameOverride
             isHlsRequest -> {
@@ -106,6 +119,7 @@ class DownloadEngine private constructor(private val appContext: Context) {
         val record = DownloadRecord(
             fileName = stagingFile.name,
             url = trimmed,
+            secondaryAudioUrl = secondaryAudioUrl.trim(),
             mimeType = if (isHlsRequest) "application/vnd.apple.mpegurl" else resolveMimeForFileName(stagingFile.name, initialMime),
             bytesRead = 0L,
             totalBytes = -1L,
@@ -117,7 +131,7 @@ class DownloadEngine private constructor(private val appContext: Context) {
             userAgent = userAgent.ifBlank { DEFAULT_DOWNLOAD_UA }
         )
         persistAndPublish(record)
-        launchWorker(record, resumeFromExisting = false)
+        launchWorker(record)
         return record
     }
 
@@ -126,13 +140,13 @@ class DownloadEngine private constructor(private val appContext: Context) {
         activeJobs.remove(id)?.cancel()
         val existing = dataStore.getDownloads().firstOrNull { it.id == id } ?: return
         if (existing.state == DownloadState.DOWNLOADING) {
-            val fileLen = existing.stagingPath.takeIf { it.isNotBlank() }?.let { f ->
-                val file = File(f)
-                if (file.exists()) file.length() else 0L
-            } ?: existing.bytesRead
+            val diskBytes = existing.stagingPath.takeIf { it.isNotBlank() }?.let {
+                computePersistedBytesForStaging(File(it))
+            } ?: 0L
+            val accurateBytes = if (diskBytes > 0L) diskBytes else existing.bytesRead
             persistAndPublish(
                 existing.copy(
-                    bytesRead = maxOf(existing.bytesRead, fileLen),
+                    bytesRead = accurateBytes,
                     speedBps = 0L,
                     state = DownloadState.PAUSED
                 )
@@ -150,10 +164,17 @@ class DownloadEngine private constructor(private val appContext: Context) {
         } else {
             allocateUniqueStagingFile(existing.fileName)
         }
-        val isHls = isHlsUrlOrMime(existing.url, existing.mimeType)
-        val canResume = !isHls && stFile.exists() && stFile.length() > 0L
+        val persistedBytes = computePersistedBytesForStaging(stFile)
+        val savedPlan = loadShardPlan(stFile)
+        val total = when {
+            savedPlan != null && savedPlan.totalBytes > 0L -> savedPlan.totalBytes
+            existing.totalBytes > 0L && persistedBytes > 0L -> existing.totalBytes
+            else -> -1L
+        }
+
         val updated = existing.copy(
-            bytesRead = if (canResume) stFile.length() else 0L,
+            bytesRead = persistedBytes,
+            totalBytes = total,
             speedBps = 0L,
             state = DownloadState.DOWNLOADING,
             stagingPath = stFile.absolutePath,
@@ -161,18 +182,15 @@ class DownloadEngine private constructor(private val appContext: Context) {
             errorMsg = ""
         )
         persistAndPublish(updated)
-        launchWorker(updated, resumeFromExisting = canResume)
+        launchWorker(updated)
     }
 
     fun cancelDownload(id: String) {
         cancelCallsForId(id)
         activeJobs.remove(id)?.cancel()
         val existing = dataStore.getDownloads().firstOrNull { it.id == id } ?: return
-        runCatching {
-            if (existing.stagingPath.isNotBlank()) {
-                File(existing.stagingPath).delete()
-                File("${existing.stagingPath}.hls.ts").delete()
-            }
+        if (existing.stagingPath.isNotBlank()) {
+            cleanupStagingArtifacts(File(existing.stagingPath), deleteTargetFile = true)
         }
         dataStore.deleteDownloadRecord(id)
         refreshSnapshot()
@@ -184,10 +202,7 @@ class DownloadEngine private constructor(private val appContext: Context) {
         if (deleteDiskFile) {
             val existing = dataStore.getDownloads().firstOrNull { it.id == id }
             if (existing != null && existing.stagingPath.isNotBlank()) {
-                runCatching {
-                    File(existing.stagingPath).delete()
-                    File("${existing.stagingPath}.hls.ts").delete()
-                }
+                cleanupStagingArtifacts(File(existing.stagingPath), deleteTargetFile = true)
             }
         }
         dataStore.deleteDownloadRecord(id)
@@ -317,7 +332,7 @@ class DownloadEngine private constructor(private val appContext: Context) {
         return b.build()
     }
 
-    private fun launchWorker(initialRecord: DownloadRecord, resumeFromExisting: Boolean) {
+    private fun launchWorker(initialRecord: DownloadRecord) {
         val job = scope.launch {
             var current = initialRecord
             var stFile = File(current.stagingPath)
@@ -326,37 +341,94 @@ class DownloadEngine private constructor(private val appContext: Context) {
             try {
                 tunnelManager.ensureRunning()
 
-                if (isHlsUrlOrMime(current.url, current.mimeType)) {
+                // 1. HLS Transfer (Resumable via .hlsdir segment checkpoints + Split Audio/Video muxing!)
+                if (isHlsUrlOrMime(current.url, current.mimeType) ||
+                    current.secondaryAudioUrl.isNotBlank() ||
+                    hlsStagingDirFor(stFile).exists()
+                ) {
                     runHlsStreamDownload(current, stFile)
                     return@launch
                 }
 
-                // IDM Multi-Connection Probe (for fresh downloads >= 2.5 MB that support HTTP 206 Range!)
-                if (!resumeFromExisting) {
-                    val probe = probeRangeSupport(current)
-                    if (probe != null && probe.supportsRange && probe.totalLength >= MIN_MULTI_THREAD_BYTES) {
-                        stFile = maybeUpgradeFileNameFromProbe(current, stFile, probe.finalUrl, probe.contentDisposition, probe.contentType)
-                        val finalMime = resolveMimeForFileName(stFile.name, probe.contentType ?: cleanMimeOrNull(current.mimeType))
-                        current = current.copy(
-                            fileName = stFile.name,
-                            mimeType = finalMime,
-                            totalBytes = probe.totalLength,
-                            localUriOrPath = stFile.absolutePath,
-                            stagingPath = stFile.absolutePath
-                        )
-                        persistAndPublish(current)
-                        runParallelRangeDownload(current, stFile, probe.totalLength, finalMime)
-                        return@launch
-                    }
+                // 2. Resume an existing Multi-Part HTTP Range checkpoint (.shards.json + .part0..N)
+                val existingShardPlan = loadShardPlan(stFile)
+                if (existingShardPlan != null && existingShardPlan.totalBytes > 0L) {
+                    runParallelRangeDownload(current, stFile, existingShardPlan)
+                    return@launch
                 }
 
-                runSingleStreamDownload(current, stFile, resumeFromExisting)
+                // 3. Resume an existing Single-Connection partial file (stFile.length() > 0)
+                if (stFile.exists() && stFile.length() > 0L) {
+                    runSingleStreamDownload(current, stFile, resumeFromExisting = true)
+                    return@launch
+                }
+
+                // 4. Fresh Direct Transfer: Probe server Range & Content-Type (also detects extensionless HLS!)
+                val probe = probeRangeSupport(current)
+                if (probe != null && isHlsUrlOrMime(probe.finalUrl, probe.contentType)) {
+                    val hlsName = stFile.nameWithoutExtension + ".mp4"
+                    stFile = maybeUpgradeFileNameFromProbe(current, stFile, probe.finalUrl, "", "video/mp4")
+                    if (!stFile.name.endsWith(".mp4", true)) {
+                        stFile = allocateUniqueStagingFile(hlsName)
+                    }
+                    current = current.copy(
+                        fileName = stFile.name,
+                        mimeType = "application/vnd.apple.mpegurl",
+                        localUriOrPath = stFile.absolutePath,
+                        stagingPath = stFile.absolutePath
+                    )
+                    persistAndPublish(current)
+                    runHlsStreamDownload(current, stFile)
+                    return@launch
+                }
+
+                if (probe != null && probe.supportsRange && probe.totalLength >= MIN_MULTI_THREAD_BYTES) {
+                    stFile = maybeUpgradeFileNameFromProbe(
+                        current,
+                        stFile,
+                        probe.finalUrl,
+                        probe.contentDisposition,
+                        probe.contentType
+                    )
+                    val finalMime = resolveMimeForFileName(
+                        stFile.name,
+                        probe.contentType ?: cleanMimeOrNull(current.mimeType)
+                    )
+                    val partCount = if (probe.totalLength >= 32L * 1024 * 1024) 6 else 4
+                    val plan = ParallelShardPlan(
+                        totalBytes = probe.totalLength,
+                        finalMime = finalMime,
+                        shards = buildParallelShards(probe.totalLength, partCount)
+                    )
+                    saveShardPlan(stFile, plan)
+                    current = current.copy(
+                        fileName = stFile.name,
+                        mimeType = finalMime,
+                        totalBytes = probe.totalLength,
+                        localUriOrPath = stFile.absolutePath,
+                        stagingPath = stFile.absolutePath
+                    )
+                    persistAndPublish(current)
+                    runParallelRangeDownload(current, stFile, plan)
+                    return@launch
+                }
+
+                runSingleStreamDownload(current, stFile, resumeFromExisting = false)
             } catch (_: CancellationException) {
-                // Paused or canceled cleanly by user
+                // Paused or canceled cleanly; exact checkpoint progress remains on disk!
+                val latest = dataStore.getDownloads().firstOrNull { it.id == current.id }
+                if (latest != null && latest.state == DownloadState.PAUSED) {
+                    val exactBytes = computePersistedBytesForStaging(stFile)
+                    if (exactBytes > 0L && exactBytes != latest.bytesRead) {
+                        persistAndPublish(latest.copy(bytesRead = exactBytes, speedBps = 0L))
+                    }
+                }
             } catch (t: Throwable) {
                 val latest = dataStore.getDownloads().firstOrNull { it.id == current.id }
                 if (latest != null && latest.state != DownloadState.PAUSED && latest.state != DownloadState.CANCELED) {
-                    val savedBytes = if (stFile.exists()) stFile.length() else current.bytesRead
+                    val savedBytes = computePersistedBytesForStaging(stFile).let {
+                        if (it > 0L) it else latest.bytesRead
+                    }
                     val failed = current.copy(
                         bytesRead = savedBytes,
                         speedBps = 0L,
@@ -400,7 +472,7 @@ class DownloadEngine private constructor(private val appContext: Context) {
                     val total = if (isPartial) {
                         resp.header("Content-Range")?.substringAfterLast('/')?.trim()?.toLongOrNull() ?: -1L
                     } else {
-                        -1L
+                        resp.header("Content-Length")?.trim()?.toLongOrNull() ?: -1L
                     }
                     RangeProbeResult(
                         totalLength = total,
@@ -445,74 +517,109 @@ class DownloadEngine private constructor(private val appContext: Context) {
     }
 
     /**
-     * IDM 4-Connection Parallel HTTP Range Downloader!
+     * IDM Resumable Multi-Connection Parallel HTTP Range Downloader!
+     * Each shard writes to its own `<stFile>.part{i}` file so pausing, resuming, or recovering after
+     * process death ALWAYS continues from `shard.start + partFile.length()` without losing a single byte!
      */
     private suspend fun runParallelRangeDownload(
         initialRecord: DownloadRecord,
         stFile: File,
-        totalBytes: Long,
-        finalMime: String
+        plan: ParallelShardPlan
     ) {
-        val parts = if (totalBytes >= 32L * 1024 * 1024) 6 else 4
-        val partSize = totalBytes / parts
-        val totalReadAtomic = AtomicLong(0L)
+        val totalBytes = plan.totalBytes
+        val initialBytesOnDisk = computeShardBytesOnDisk(stFile, plan)
+        val totalReadAtomic = AtomicLong(initialBytesOnDisk)
         val reportLock = Any()
         var lastReportMs = System.currentTimeMillis()
-        var bytesAtLastReport = 0L
+        var bytesAtLastReport = initialBytesOnDisk
 
-        RandomAccessFile(stFile, "rw").use { raf ->
-            raf.setLength(totalBytes)
-            val channel = raf.channel
-            val limiter = Semaphore(parts)
+        persistAndPublish(
+            initialRecord.copy(
+                bytesRead = initialBytesOnDisk,
+                totalBytes = totalBytes,
+                speedBps = 0L,
+                state = DownloadState.DOWNLOADING
+            )
+        )
 
-            coroutineScope {
-                (0 until parts).map { idx ->
-                    val start = idx * partSize
-                    val endInclusive = if (idx == parts - 1) totalBytes - 1 else (idx + 1) * partSize - 1
-                    async(Dispatchers.IO) {
-                        limiter.withPermit {
-                            downloadByteRangePart(
-                                rec = initialRecord,
-                                channel = channel,
-                                start = start,
-                                endInclusive = endInclusive,
-                                onChunkWritten = { written ->
-                                    val nowTotal = totalReadAtomic.addAndGet(written.toLong())
-                                    val now = System.currentTimeMillis()
-                                    if (now - lastReportMs >= 350L) {
-                                        synchronized(reportLock) {
-                                            val elapsed = now - lastReportMs
-                                            if (elapsed >= 350L) {
-                                                val delta = nowTotal - bytesAtLastReport
-                                                val bps = (delta * 1000L) / elapsed.coerceAtLeast(1L)
-                                                lastReportMs = now
-                                                bytesAtLastReport = nowTotal
-                                                persistAndPublish(
-                                                    initialRecord.copy(
-                                                        bytesRead = nowTotal,
-                                                        totalBytes = totalBytes,
-                                                        speedBps = bps,
-                                                        state = DownloadState.DOWNLOADING
-                                                    )
+        val limiter = Semaphore(plan.shards.size.coerceAtLeast(1))
+        coroutineScope {
+            plan.shards.map { shard ->
+                async(Dispatchers.IO) {
+                    limiter.withPermit {
+                        downloadShardToPartFile(
+                            rec = initialRecord,
+                            partFile = partFileFor(stFile, shard.index),
+                            shard = shard,
+                            onChunkWritten = { written ->
+                                val nowTotal = totalReadAtomic.addAndGet(written.toLong())
+                                val now = System.currentTimeMillis()
+                                if (now - lastReportMs >= 350L) {
+                                    synchronized(reportLock) {
+                                        val elapsed = now - lastReportMs
+                                        if (elapsed >= 350L) {
+                                            val delta = (nowTotal - bytesAtLastReport).coerceAtLeast(0L)
+                                            val bps = (delta * 1000L) / elapsed.coerceAtLeast(1L)
+                                            lastReportMs = now
+                                            bytesAtLastReport = nowTotal
+                                            persistAndPublish(
+                                                initialRecord.copy(
+                                                    bytesRead = nowTotal.coerceAtMost(totalBytes),
+                                                    totalBytes = totalBytes,
+                                                    speedBps = bps,
+                                                    state = DownloadState.DOWNLOADING
                                                 )
-                                            }
+                                            )
                                         }
                                     }
                                 }
-                            )
-                        }
+                            }
+                        )
                     }
-                }.forEach { it.await() }
-            }
+                }
+            }.awaitAll()
         }
 
-        exportCopyToPublicDownloadsQuietly(stFile, finalMime)
+        coroutineContext.ensureActive()
+
+        // Verify all shards completed cleanly before joining
+        val assembledSum = computeShardBytesOnDisk(stFile, plan)
+        if (assembledSum != totalBytes) {
+            throw IllegalStateException("قطعات دانلود کامل نشدند ($assembledSum از $totalBytes بایت)")
+        }
+
+        val joinTemp = File("${stFile.absolutePath}.joining")
+        FileOutputStream(joinTemp, false).use { out ->
+            val copyBuf = ByteArray(256 * 1024)
+            for (shard in plan.shards) {
+                coroutineContext.ensureActive()
+                partFileFor(stFile, shard.index).inputStream().use { inp ->
+                    while (true) {
+                        val n = inp.read(copyBuf)
+                        if (n <= 0) break
+                        out.write(copyBuf, 0, n)
+                    }
+                }
+            }
+            out.flush()
+        }
+
+        if (stFile.exists()) stFile.delete()
+        if (!joinTemp.renameTo(stFile)) {
+            joinTemp.copyTo(stFile, overwrite = true)
+            joinTemp.delete()
+        }
+
+        // Remove part checkpoints now that the joined target file is verified complete
+        cleanupStagingArtifacts(stFile, deleteTargetFile = false)
+
+        exportCopyToPublicDownloadsQuietly(stFile, plan.finalMime)
         val completed = initialRecord.copy(
             bytesRead = totalBytes,
             totalBytes = totalBytes,
             speedBps = 0L,
             state = DownloadState.COMPLETED,
-            mimeType = finalMime,
+            mimeType = plan.finalMime,
             localUriOrPath = stFile.absolutePath,
             stagingPath = stFile.absolutePath,
             errorMsg = ""
@@ -521,54 +628,61 @@ class DownloadEngine private constructor(private val appContext: Context) {
         onDownloadEventToast?.invoke("✅ دانلود پرسرعت کامل شد: ${completed.fileName}", true)
     }
 
-    private suspend fun downloadByteRangePart(
+    private suspend fun downloadShardToPartFile(
         rec: DownloadRecord,
-        channel: java.nio.channels.FileChannel,
-        start: Long,
-        endInclusive: Long,
+        partFile: File,
+        shard: ByteShard,
         onChunkWritten: (Int) -> Unit
     ) {
-        var pos = start
+        val expected = shard.expectedBytes
+        var have = if (partFile.exists()) partFile.length() else 0L
+        if (have > expected) {
+            // Truncate any corrupt excess bytes beyond shard boundary
+            RandomAccessFile(partFile, "rw").use { it.setLength(expected) }
+            have = expected
+        }
+        if (have == expected) return
+
         var attempt = 0
         val buf = ByteArray(64 * 1024)
-        while (pos <= endInclusive) {
+        while (have < expected) {
             coroutineContext.ensureActive()
+            val reqStart = shard.start + have
             try {
                 val req = buildAuthenticatedRequest(
                     rec.url,
                     rec.userAgent,
                     rec.refererUrl,
-                    "bytes=$pos-$endInclusive"
+                    "bytes=$reqStart-${shard.endInclusive}"
                 )
                 val call = tunnelManager.getStreamingDownloadOkHttpClient().newCall(req)
                 registerCall(rec.id, call)
                 try {
                     call.execute().use { resp ->
                         if (resp.code != 206) {
-                            throw IllegalStateException("HTTP ${resp.code}")
+                            throw IllegalStateException("سرور از ادامه قطعه پشتیبانی نکرد (HTTP ${resp.code})")
                         }
-                        val ins = resp.body?.byteStream() ?: throw IllegalStateException("Empty range body")
-                        ins.use { stream ->
-                            while (pos <= endInclusive) {
-                                coroutineContext.ensureActive()
-                                val maxToRead = minOf(buf.size.toLong(), endInclusive - pos + 1L).toInt()
-                                val n = stream.read(buf, 0, maxToRead)
-                                if (n <= 0) break
-                                var writtenInSlice = 0
-                                val bb = ByteBuffer.wrap(buf, 0, n)
-                                while (bb.hasRemaining()) {
-                                    writtenInSlice += channel.write(bb, pos + writtenInSlice)
+                        val ins = resp.body?.byteStream() ?: throw IllegalStateException("پاسخ قطعه خالی بود")
+                        FileOutputStream(partFile, have > 0L).use { fos ->
+                            ins.use { stream ->
+                                while (have < expected) {
+                                    coroutineContext.ensureActive()
+                                    val maxToRead = minOf(buf.size.toLong(), expected - have).toInt()
+                                    val n = stream.read(buf, 0, maxToRead)
+                                    if (n <= 0) break
+                                    fos.write(buf, 0, n)
+                                    have += n
+                                    onChunkWritten(n)
                                 }
-                                pos += n
-                                onChunkWritten(n)
                             }
+                            fos.flush()
                         }
                     }
                 } finally {
                     unregisterCall(rec.id, call)
                 }
-                if (pos <= endInclusive) {
-                    throw IllegalStateException("اتصال قطعه ناقص ماند")
+                if (have < expected) {
+                    throw IllegalStateException("اتصال قطعه پیش از پایان قطع شد")
                 }
             } catch (ce: CancellationException) {
                 throw ce
@@ -579,129 +693,237 @@ class DownloadEngine private constructor(private val appContext: Context) {
         }
     }
 
+    private data class HlsSegmentTask(
+        val fileName: String,
+        val url: String,
+        val sequence: Long,
+        val byteRange: HlsPlaylistParser.ByteRangeSpec?,
+        val aesKeyUrl: String?,
+        val aesIv: ByteArray?,
+        val stripPackedAudioId3: Boolean
+    )
+
     /**
-     * IDM HLS (`.m3u8`) Concurrent Segment Downloader + Lossless MP4 Remuxer!
+     * IDM Resumable HLS (`.m3u8`) Video + Separate Audio Concurrent Segment Downloader & MP4 Merger!
+     * - Supports `#EXT-X-MEDIA:TYPE=AUDIO` separate audio renditions (never downloads mute video!).
+     * - Supports `#EXT-X-MAP` (`fMP4`), `#EXT-X-BYTERANGE`, Packed-Audio `ID3`/ADTS, and `METHOD=AES-128`.
+     * - Persists every completed segment atomically as `<targetFile>.hlsdir/<seg>.done` so Pause -> Resume
+     *   continues immediately from the exact segment where it stopped!
      */
     private suspend fun runHlsStreamDownload(initialRecord: DownloadRecord, targetFile: File) {
-        var playlistUrl = initialRecord.url
-        var manifestText = fetchTextThroughTunnel(initialRecord, playlistUrl)
+        var videoPlaylistUrl = initialRecord.url
+        var audioPlaylistUrl = initialRecord.secondaryAudioUrl.trim().ifBlank { null }
 
+        var manifestText = fetchTextThroughTunnel(initialRecord, videoPlaylistUrl)
         if (!HlsPlaylistParser.looksLikeHlsManifest(manifestText)) {
             throw IllegalStateException("لیست پخش استریم (.m3u8) معتبر نیست یا منقضی شده است")
         }
 
         if (HlsPlaylistParser.isMasterPlaylist(manifestText)) {
-            val variants = HlsPlaylistParser.parseMasterPlaylist(manifestText, playlistUrl)
+            val variants = HlsPlaylistParser.parseMasterPlaylist(manifestText, videoPlaylistUrl)
             if (variants.isEmpty()) {
                 throw IllegalStateException("هیچ کیفیتی در استریم یافت نشد")
             }
-            playlistUrl = variants.first().url
-            manifestText = fetchTextThroughTunnel(initialRecord, playlistUrl)
+            val chosen = variants.first()
+            videoPlaylistUrl = chosen.url
+            if (audioPlaylistUrl == null && !chosen.audioUrl.isNullOrBlank()) {
+                audioPlaylistUrl = chosen.audioUrl
+            }
+            manifestText = fetchTextThroughTunnel(initialRecord, videoPlaylistUrl)
         }
 
-        val mediaPlaylist = HlsPlaylistParser.parseMediaPlaylist(manifestText, playlistUrl)
-        if (mediaPlaylist.isDrmOrEncrypted) {
-            throw IllegalStateException("این ویدیو دارای قفل DRM/رمزنگاری (${mediaPlaylist.encryptionMethod}) است")
+        val videoPlaylist = HlsPlaylistParser.parseMediaPlaylist(manifestText, videoPlaylistUrl)
+        if (videoPlaylist.isDrmOrEncrypted) {
+            throw IllegalStateException("این ویدیو دارای قفل DRM (${videoPlaylist.encryptionMethod}) است")
         }
-        if (mediaPlaylist.segments.isEmpty()) {
+        if (videoPlaylist.segments.isEmpty()) {
             throw IllegalStateException("قطعات ویدیو در لیست پخش یافت نشد")
         }
 
-        val tempTsFile = File("${targetFile.absolutePath}.hls.ts")
-        if (tempTsFile.exists()) tempTsFile.delete()
+        val audioPlaylist = if (!audioPlaylistUrl.isNullOrBlank() && audioPlaylistUrl != videoPlaylistUrl) {
+            runCatching {
+                val aBody = fetchTextThroughTunnel(initialRecord, audioPlaylistUrl)
+                if (HlsPlaylistParser.looksLikeHlsManifest(aBody) && !HlsPlaylistParser.isMasterPlaylist(aBody)) {
+                    val parsedA = HlsPlaylistParser.parseMediaPlaylist(aBody, audioPlaylistUrl)
+                    if (!parsedA.isDrmOrEncrypted && parsedA.segments.isNotEmpty()) parsedA else null
+                } else {
+                    null
+                }
+            }.getOrNull()
+        } else {
+            null
+        }
 
-        val totalSegments = mediaPlaylist.segments.size
-        var totalBytesWritten = 0L
-        var lastReportMs = System.currentTimeMillis()
-        var bytesAtLastReport = 0L
+        val hlsDir = hlsStagingDirFor(targetFile).apply { mkdirs() }
 
-        FileOutputStream(tempTsFile).use { fos ->
-            mediaPlaylist.initMapUrl?.let { initUrl ->
-                val initBytes = fetchSegmentBytesWithRetry(initialRecord, initUrl)
-                fos.write(initBytes)
-                totalBytesWritten += initBytes.size
+        val videoTasks = buildHlsTasksForPlaylist("v", videoPlaylist, stripPackedId3 = videoPlaylist.initMapUrl == null)
+        val audioTasks = if (audioPlaylist != null) {
+            buildHlsTasksForPlaylist("a", audioPlaylist, stripPackedId3 = audioPlaylist.initMapUrl == null)
+        } else {
+            emptyList()
+        }
+        val allTasks = ArrayList<HlsSegmentTask>(videoTasks.size + audioTasks.size).apply {
+            addAll(videoTasks)
+            addAll(audioTasks)
+        }
+        val totalUnits = allTasks.size.coerceAtLeast(1)
+
+        var preCompletedCount = 0
+        var preCompletedBytes = 0L
+        for (t in allTasks) {
+            val done = File(hlsDir, t.fileName)
+            if (done.exists() && done.length() > 0L) {
+                preCompletedCount++
+                preCompletedBytes += done.length()
             }
+        }
 
-            val limiter = Semaphore(4)
-            coroutineScope {
-                val window = ArrayDeque<Deferred<ByteArray>>()
-                var nextIdx = 0
-                var writtenCount = 0
+        val completedUnitsAtomic = AtomicInteger(preCompletedCount)
+        val bytesWrittenAtomic = AtomicLong(preCompletedBytes)
+        val reportLock = Any()
+        var lastReportMs = System.currentTimeMillis()
+        var bytesAtLastReport = preCompletedBytes
 
-                while (writtenCount < totalSegments) {
-                    while (nextIdx < totalSegments && window.size < 8) {
-                        val segUrl = mediaPlaylist.segments[nextIdx].url
-                        window.addLast(
-                            async(Dispatchers.IO) {
-                                limiter.withPermit {
-                                    fetchSegmentBytesWithRetry(initialRecord, segUrl)
+        val initEstTotal = if (preCompletedCount > 0) {
+            (preCompletedBytes * totalUnits) / preCompletedCount
+        } else {
+            -1L
+        }
+        persistAndPublish(
+            initialRecord.copy(
+                secondaryAudioUrl = audioPlaylistUrl.orEmpty(),
+                bytesRead = preCompletedBytes,
+                totalBytes = initEstTotal,
+                speedBps = 0L,
+                state = DownloadState.DOWNLOADING,
+                errorMsg = "قطعه $preCompletedCount از $totalUnits"
+            )
+        )
+
+        val aesKeyCache = ConcurrentHashMap<String, ByteArray>()
+        val limiter = Semaphore(4)
+
+        coroutineScope {
+            allTasks.map { task ->
+                async(Dispatchers.IO) {
+                    val doneFile = File(hlsDir, task.fileName)
+                    if (doneFile.exists() && doneFile.length() > 0L) {
+                        return@async
+                    }
+                    limiter.withPermit {
+                        coroutineContext.ensureActive()
+                        var bytes = fetchSegmentBytesWithRetry(
+                            initialRecord,
+                            task.url,
+                            task.byteRange?.toHttpRangeHeader()
+                        )
+                        if (!task.aesKeyUrl.isNullOrBlank()) {
+                            val key = aesKeyCache[task.aesKeyUrl] ?: run {
+                                val fetchedKey = fetchSegmentBytesWithRetry(initialRecord, task.aesKeyUrl, null)
+                                if (fetchedKey.size == 16) {
+                                    aesKeyCache[task.aesKeyUrl] = fetchedKey
+                                }
+                                fetchedKey
+                            }
+                            bytes = HlsPlaylistParser.decryptAes128(
+                                cipherBytes = bytes,
+                                keyBytes = key,
+                                explicitIv = task.aesIv,
+                                sequence = task.sequence
+                            )
+                        }
+                        if (task.stripPackedAudioId3) {
+                            bytes = HlsPlaylistParser.stripPackedAudioId3Headers(bytes)
+                        }
+
+                        val tmpFile = File(hlsDir, "${task.fileName}.tmp")
+                        FileOutputStream(tmpFile, false).use { out ->
+                            out.write(bytes)
+                            out.flush()
+                        }
+                        if (doneFile.exists()) doneFile.delete()
+                        if (!tmpFile.renameTo(doneFile)) {
+                            tmpFile.copyTo(doneFile, overwrite = true)
+                            tmpFile.delete()
+                        }
+
+                        val doneCnt = completedUnitsAtomic.incrementAndGet()
+                        val nowBytes = bytesWrittenAtomic.addAndGet(bytes.size.toLong())
+                        val now = System.currentTimeMillis()
+                        if (now - lastReportMs >= 320L || doneCnt == totalUnits) {
+                            synchronized(reportLock) {
+                                val elapsed = now - lastReportMs
+                                if (elapsed >= 320L || doneCnt == totalUnits) {
+                                    val delta = (nowBytes - bytesAtLastReport).coerceAtLeast(0L)
+                                    val bps = (delta * 1000L) / elapsed.coerceAtLeast(1L)
+                                    lastReportMs = now
+                                    bytesAtLastReport = nowBytes
+                                    val estTotal = if (doneCnt > 0) (nowBytes * totalUnits) / doneCnt else -1L
+                                    persistAndPublish(
+                                        initialRecord.copy(
+                                            secondaryAudioUrl = audioPlaylistUrl.orEmpty(),
+                                            bytesRead = nowBytes,
+                                            totalBytes = estTotal,
+                                            speedBps = bps,
+                                            state = DownloadState.DOWNLOADING,
+                                            errorMsg = "قطعه $doneCnt از $totalUnits"
+                                        )
+                                    )
                                 }
                             }
-                        )
-                        nextIdx++
-                    }
-
-                    val segBytes = window.removeFirst().await()
-                    coroutineContext.ensureActive()
-                    fos.write(segBytes)
-                    writtenCount++
-                    totalBytesWritten += segBytes.size
-
-                    val now = System.currentTimeMillis()
-                    if (now - lastReportMs >= 350L || writtenCount == totalSegments) {
-                        val elapsed = (now - lastReportMs).coerceAtLeast(1L)
-                        val bps = ((totalBytesWritten - bytesAtLastReport) * 1000L) / elapsed
-                        lastReportMs = now
-                        bytesAtLastReport = totalBytesWritten
-
-                        val estimatedTotal = if (writtenCount > 0) {
-                            (totalBytesWritten * totalSegments) / writtenCount
-                        } else -1L
-
-                        persistAndPublish(
-                            initialRecord.copy(
-                                bytesRead = totalBytesWritten,
-                                totalBytes = estimatedTotal,
-                                speedBps = bps,
-                                state = DownloadState.DOWNLOADING,
-                                errorMsg = "قطعه $writtenCount از $totalSegments"
-                            )
-                        )
+                        }
                     }
                 }
-            }
+            }.awaitAll()
         }
 
-        // Losslessly remux MPEG-TS -> MP4 via Android MediaMuxer so Gallery & all players support seeking!
+        coroutineContext.ensureActive()
+
+        // Concatenate video segments (+ audio segments if separate #EXT-X-MEDIA:TYPE=AUDIO exists)
+        val assembledVideo = File(hlsDir, "assembled_video.stream")
+        concatenateHlsTaskFiles(hlsDir, videoTasks, assembledVideo)
+
+        val assembledAudio = if (audioTasks.isNotEmpty()) {
+            File(hlsDir, "assembled_audio.stream").also {
+                concatenateHlsTaskFiles(hlsDir, audioTasks, it)
+            }
+        } else {
+            null
+        }
+
+        // Losslessly mux Video + Audio into fast-seeking MP4 container!
+        val remuxedOk = MediaRemuxer.remuxOrMergeToMp4(assembledVideo, assembledAudio, targetFile)
+
         val finalFile: File
         val finalMime: String
-        val remuxedOk = if (mediaPlaylist.initMapUrl == null) {
-            MediaRemuxer.remuxTsToMp4(tempTsFile, targetFile)
-        } else {
-            tempTsFile.renameTo(targetFile)
-        }
-
         if (remuxedOk && targetFile.exists() && targetFile.length() > 0L) {
-            tempTsFile.delete()
+            finalFile = targetFile
+            finalMime = "video/mp4"
+        } else if (videoPlaylist.initMapUrl != null) {
+            // Already valid fMP4 container
+            if (targetFile.exists()) targetFile.delete()
+            if (!assembledVideo.renameTo(targetFile)) {
+                assembledVideo.copyTo(targetFile, overwrite = true)
+            }
             finalFile = targetFile
             finalMime = "video/mp4"
         } else {
-            val fallbackTs = File(
-                targetFile.parentFile,
-                targetFile.nameWithoutExtension + ".ts"
-            )
-            if (tempTsFile.renameTo(fallbackTs)) {
-                finalFile = fallbackTs
-            } else {
-                finalFile = tempTsFile
+            val fallbackTs = File(targetFile.parentFile, targetFile.nameWithoutExtension + ".ts")
+            if (fallbackTs.exists()) fallbackTs.delete()
+            if (!assembledVideo.renameTo(fallbackTs)) {
+                assembledVideo.copyTo(fallbackTs, overwrite = true)
             }
+            finalFile = fallbackTs
             finalMime = "video/mp2t"
         }
+
+        cleanupStagingArtifacts(targetFile, deleteTargetFile = false)
 
         exportCopyToPublicDownloadsQuietly(finalFile, finalMime)
         val finalLen = finalFile.length()
         val doneRecord = initialRecord.copy(
             fileName = finalFile.name,
+            secondaryAudioUrl = audioPlaylistUrl.orEmpty(),
             mimeType = finalMime,
             bytesRead = finalLen,
             totalBytes = finalLen,
@@ -712,7 +934,68 @@ class DownloadEngine private constructor(private val appContext: Context) {
             errorMsg = ""
         )
         persistAndPublish(doneRecord)
-        onDownloadEventToast?.invoke("✅ دانلود استریم کامل شد: ${doneRecord.fileName}", true)
+        onDownloadEventToast?.invoke("✅ دانلود استریم با صدا کامل شد: ${doneRecord.fileName}", true)
+    }
+
+    private fun buildHlsTasksForPlaylist(
+        prefix: String,
+        playlist: HlsPlaylistParser.ParsedMediaPlaylist,
+        stripPackedId3: Boolean
+    ): List<HlsSegmentTask> {
+        val list = ArrayList<HlsSegmentTask>(playlist.segments.size + 1)
+        if (!playlist.initMapUrl.isNullOrBlank()) {
+            list.add(
+                HlsSegmentTask(
+                    fileName = "${prefix}_init.done",
+                    url = playlist.initMapUrl,
+                    sequence = 0L,
+                    byteRange = playlist.initMapByteRange,
+                    aesKeyUrl = playlist.initMapAesKeyUrl,
+                    aesIv = playlist.initMapAesIv,
+                    stripPackedAudioId3 = false
+                )
+            )
+        }
+        playlist.segments.forEachIndexed { idx, seg ->
+            list.add(
+                HlsSegmentTask(
+                    fileName = String.format(Locale.US, "%s_seg_%05d.done", prefix, idx),
+                    url = seg.url,
+                    sequence = seg.sequence,
+                    byteRange = seg.byteRange,
+                    aesKeyUrl = seg.aes128KeyUrl,
+                    aesIv = seg.aes128Iv,
+                    stripPackedAudioId3 = stripPackedId3
+                )
+            )
+        }
+        return list
+    }
+
+    private suspend fun concatenateHlsTaskFiles(
+        hlsDir: File,
+        tasks: List<HlsSegmentTask>,
+        outFile: File
+    ) {
+        if (outFile.exists()) outFile.delete()
+        val buf = ByteArray(256 * 1024)
+        FileOutputStream(outFile, false).use { out ->
+            for (t in tasks) {
+                coroutineContext.ensureActive()
+                val segFile = File(hlsDir, t.fileName)
+                if (!segFile.exists()) {
+                    throw IllegalStateException("قطعه دانلود شده یافت نشد: ${t.fileName}")
+                }
+                segFile.inputStream().use { inp ->
+                    while (true) {
+                        val n = inp.read(buf)
+                        if (n <= 0) break
+                        out.write(buf, 0, n)
+                    }
+                }
+            }
+            out.flush()
+        }
     }
 
     private fun fetchTextThroughTunnel(rec: DownloadRecord, url: String): String {
@@ -731,21 +1014,27 @@ class DownloadEngine private constructor(private val appContext: Context) {
         }
     }
 
-    private suspend fun fetchSegmentBytesWithRetry(rec: DownloadRecord, segUrl: String): ByteArray {
+    private suspend fun fetchSegmentBytesWithRetry(
+        rec: DownloadRecord,
+        segUrl: String,
+        rangeHeader: String? = null
+    ): ByteArray {
         var attempt = 0
         while (true) {
             coroutineContext.ensureActive()
             try {
-                val req = buildAuthenticatedRequest(segUrl, rec.userAgent, rec.refererUrl)
+                val req = buildAuthenticatedRequest(segUrl, rec.userAgent, rec.refererUrl, rangeHeader)
                 val call = tunnelManager.getStreamingDownloadOkHttpClient().newCall(req)
                 registerCall(rec.id, call)
                 try {
                     call.execute().use { resp ->
-                        if (!resp.isSuccessful) {
+                        if (!resp.isSuccessful && resp.code != 206) {
                             throw IllegalStateException("HTTP ${resp.code}")
                         }
                         val body = resp.body ?: return ByteArray(0)
-                        val out = ByteArrayOutputStream(body.contentLength().coerceIn(4096L, 16L * 1024 * 1024).toInt())
+                        val out = ByteArrayOutputStream(
+                            body.contentLength().coerceIn(4096L, 16L * 1024 * 1024).toInt()
+                        )
                         val buf = ByteArray(32 * 1024)
                         body.byteStream().use { ins ->
                             while (true) {
@@ -830,7 +1119,7 @@ class DownloadEngine private constructor(private val appContext: Context) {
                     }
                     raf.seek(writeOffset)
 
-                    val buf = ByteArray(32 * 1024)
+                    val buf = ByteArray(64 * 1024)
                     val ins = body.byteStream()
                     var bytesCopied = writeOffset
                     var lastReportMs = System.currentTimeMillis()
@@ -846,7 +1135,7 @@ class DownloadEngine private constructor(private val appContext: Context) {
                         val now = System.currentTimeMillis()
                         val elapsedMs = now - lastReportMs
                         if (elapsedMs >= 350L) {
-                            val deltaBytes = bytesCopied - bytesAtLastReport
+                            val deltaBytes = (bytesCopied - bytesAtLastReport).coerceAtLeast(0L)
                             val bps = (deltaBytes * 1000L) / elapsedMs.coerceAtLeast(1L)
                             lastReportMs = now
                             bytesAtLastReport = bytesCopied
@@ -901,7 +1190,7 @@ class DownloadEngine private constructor(private val appContext: Context) {
                 }
                 val itemUri = resolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values) ?: return
                 resolver.openOutputStream(itemUri)?.use { out ->
-                    sourceFile.inputStream().use { inp -> inp.copyTo(out, 32 * 1024) }
+                    sourceFile.inputStream().use { inp -> inp.copyTo(out, 64 * 1024) }
                 }
                 values.clear()
                 values.put(MediaStore.Downloads.IS_PENDING, 0)
@@ -938,22 +1227,164 @@ class DownloadEngine private constructor(private val appContext: Context) {
         val dir = stagingDir()
         val clean = sanitizeFileName(desiredName)
         var candidate = File(dir, clean)
-        if (!candidate.exists()) return candidate
+        if (!candidate.exists() && !shardMetaFileFor(candidate).exists() && !hlsStagingDirFor(candidate).exists()) {
+            return candidate
+        }
 
         val dot = clean.lastIndexOf('.')
         val stem = if (dot > 0) clean.substring(0, dot) else clean
         val ext = if (dot > 0) clean.substring(dot) else ""
         for (i in 1..999) {
             candidate = File(dir, "${stem}_($i)$ext")
-            if (!candidate.exists()) return candidate
+            if (!candidate.exists() && !shardMetaFileFor(candidate).exists() && !hlsStagingDirFor(candidate).exists()) {
+                return candidate
+            }
         }
         return File(dir, "${System.currentTimeMillis()}_$clean")
     }
+
+    data class ByteShard(
+        val index: Int,
+        val start: Long,
+        val endInclusive: Long
+    ) {
+        val expectedBytes: Long get() = endInclusive - start + 1L
+    }
+
+    data class ParallelShardPlan(
+        val totalBytes: Long,
+        val finalMime: String,
+        val shards: List<ByteShard>
+    )
 
     companion object {
         private const val MIN_MULTI_THREAD_BYTES = 2_621_440L // 2.5 MB
         const val DEFAULT_DOWNLOAD_UA =
             "Mozilla/5.0 (Linux; Android 15; Pixel 9) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/134.0.0.0 Mobile Safari/537.36"
+
+        fun partFileFor(stagingFile: File, shardIndex: Int): File =
+            File("${stagingFile.absolutePath}.part$shardIndex")
+
+        fun shardMetaFileFor(stagingFile: File): File =
+            File("${stagingFile.absolutePath}.shards.json")
+
+        fun hlsStagingDirFor(stagingFile: File): File =
+            File("${stagingFile.absolutePath}.hlsdir")
+
+        fun buildParallelShards(totalBytes: Long, partCount: Int): List<ByteShard> {
+            require(totalBytes > 0L) { "totalBytes must be positive" }
+            val parts = partCount.coerceIn(1, 8)
+            val baseSize = totalBytes / parts
+            return (0 until parts).map { idx ->
+                val start = idx * baseSize
+                val end = if (idx == parts - 1) totalBytes - 1L else ((idx + 1) * baseSize) - 1L
+                ByteShard(index = idx, start = start, endInclusive = end)
+            }
+        }
+
+        fun saveShardPlan(stagingFile: File, plan: ParallelShardPlan) {
+            val sb = StringBuilder()
+            sb.append("v=1\n")
+            sb.append("totalBytes=").append(plan.totalBytes).append('\n')
+            sb.append("finalMime=").append(plan.finalMime.replace('\n', ' ')).append('\n')
+            for (s in plan.shards) {
+                sb.append("shard=").append(s.index).append(':').append(s.start).append('-').append(s.endInclusive).append('\n')
+            }
+            val metaFile = shardMetaFileFor(stagingFile)
+            metaFile.parentFile?.mkdirs()
+            val tmp = File("${metaFile.absolutePath}.tmp")
+            tmp.writeText(sb.toString())
+            if (metaFile.exists()) metaFile.delete()
+            if (!tmp.renameTo(metaFile)) {
+                tmp.copyTo(metaFile, overwrite = true)
+                tmp.delete()
+            }
+        }
+
+        fun loadShardPlan(stagingFile: File): ParallelShardPlan? {
+            val metaFile = shardMetaFileFor(stagingFile)
+            if (!metaFile.exists()) return null
+            return runCatching {
+                var total = -1L
+                var mime = "application/octet-stream"
+                val list = ArrayList<ByteShard>()
+                for (rawLine in metaFile.readLines()) {
+                    val line = rawLine.trim()
+                    when {
+                        line.startsWith("totalBytes=") -> {
+                            total = line.substringAfter('=').trim().toLongOrNull() ?: -1L
+                        }
+                        line.startsWith("finalMime=") -> {
+                            mime = line.substringAfter('=').trim().ifBlank { "application/octet-stream" }
+                        }
+                        line.startsWith("shard=") -> {
+                            val spec = line.substringAfter('=')
+                            val idx = spec.substringBefore(':').toIntOrNull() ?: continue
+                            val rangePart = spec.substringAfter(':', "")
+                            val st = rangePart.substringBefore('-').toLongOrNull() ?: continue
+                            val en = rangePart.substringAfter('-', "").toLongOrNull() ?: continue
+                            if (st >= 0L && en >= st) {
+                                list.add(ByteShard(idx, st, en))
+                            }
+                        }
+                    }
+                }
+                if (total <= 0L || list.isEmpty()) null else ParallelShardPlan(total, mime, list)
+            }.getOrNull()
+        }
+
+        fun computeShardBytesOnDisk(stagingFile: File, plan: ParallelShardPlan): Long {
+            var sum = 0L
+            for (s in plan.shards) {
+                val pf = partFileFor(stagingFile, s.index)
+                if (pf.exists()) {
+                    sum += pf.length().coerceIn(0L, s.expectedBytes)
+                }
+            }
+            return sum
+        }
+
+        /**
+         * Returns exact kernel-persisted progress across Multi-Part Shards, HLS `.done` segments,
+         * or Single-Stream partial files so Pause/Resume NEVER resets to 0% or misreads sparse files!
+         */
+        fun computePersistedBytesForStaging(stagingFile: File): Long {
+            val plan = loadShardPlan(stagingFile)
+            if (plan != null) {
+                return computeShardBytesOnDisk(stagingFile, plan)
+            }
+            val hlsDir = hlsStagingDirFor(stagingFile)
+            if (hlsDir.exists() && hlsDir.isDirectory) {
+                val doneBytes = hlsDir.listFiles()
+                    ?.filter { it.isFile && it.name.endsWith(".done") }
+                    ?.sumOf { it.length() }
+                    ?: 0L
+                if (doneBytes > 0L) return doneBytes
+            }
+            return if (stagingFile.exists() && stagingFile.isFile) stagingFile.length() else 0L
+        }
+
+        fun cleanupStagingArtifacts(stagingFile: File, deleteTargetFile: Boolean) {
+            runCatching {
+                val plan = loadShardPlan(stagingFile)
+                if (plan != null) {
+                    for (s in plan.shards) {
+                        partFileFor(stagingFile, s.index).delete()
+                    }
+                } else {
+                    for (idx in 0..8) {
+                        partFileFor(stagingFile, idx).delete()
+                    }
+                }
+                shardMetaFileFor(stagingFile).delete()
+                File("${stagingFile.absolutePath}.joining").delete()
+                File("${stagingFile.absolutePath}.hls.ts").delete()
+                hlsStagingDirFor(stagingFile).deleteRecursively()
+                if (deleteTargetFile && stagingFile.exists()) {
+                    stagingFile.delete()
+                }
+            }
+        }
 
         @Volatile
         private var INSTANCE: DownloadEngine? = null
