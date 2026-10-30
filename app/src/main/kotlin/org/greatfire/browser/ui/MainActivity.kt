@@ -7,6 +7,7 @@ import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.content.res.Configuration
 import android.graphics.Color
 import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
@@ -14,6 +15,8 @@ import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.speech.RecognizerIntent
+import android.speech.tts.TextToSpeech
+import android.speech.tts.UtteranceProgressListener
 import android.text.Editable
 import android.text.SpannableString
 import android.text.Spanned
@@ -30,6 +33,7 @@ import android.view.inputmethod.InputMethodManager
 import android.webkit.ValueCallback
 import android.webkit.WebChromeClient
 import android.widget.EditText
+import android.widget.FrameLayout
 import android.widget.ImageButton
 import android.widget.LinearLayout
 import android.widget.PopupMenu
@@ -57,6 +61,7 @@ import kotlinx.coroutines.withContext
 import okhttp3.Request
 import org.greatfire.browser.R
 import org.greatfire.browser.data.BrowserDataStore
+import org.greatfire.browser.data.ChromeColorTheme
 import org.greatfire.browser.data.DownloadRecord
 import org.greatfire.browser.data.DownloadState
 import org.greatfire.browser.data.SearchEngine
@@ -64,6 +69,7 @@ import org.greatfire.browser.data.ShortcutItem
 import org.greatfire.browser.databinding.ActivityMainBinding
 import org.greatfire.browser.databinding.DialogProxySettingsBinding
 import org.greatfire.browser.download.DownloadEngine
+import org.greatfire.browser.media.VideoStreamSniffer
 import org.greatfire.browser.vpn.GatewayStatus
 import org.greatfire.browser.vpn.TunnelManager
 import org.greatfire.browser.vpn.VerifiedNodeItem
@@ -97,12 +103,19 @@ class MainActivity : AppCompatActivity() {
     private var programmaticUrlChange = false
     private var lastErrorSnackbarAt = 0L
 
+    private val dismissedIdmPageUrls = HashSet<String>()
+    private var textToSpeech: TextToSpeech? = null
+    private var ttsChunks: List<String> = emptyList()
+    private var ttsChunkIndex: Int = 0
+    private var ttsPaused: Boolean = false
+
     private data class PendingDownloadArgs(
         val url: String,
         val userAgent: String,
         val contentDisposition: String,
         val mimeType: String,
-        val refererUrl: String
+        val refererUrl: String,
+        val suggestedFileNameOverride: String = ""
     )
 
     private val fileChooserLauncher = registerForActivityResult(
@@ -247,6 +260,8 @@ class MainActivity : AppCompatActivity() {
         )
 
         setupToolbarAndOmnibox()
+        applyAddressBarPlacement()
+        applyChromeAppearanceLive()
         refreshChromeShortcutsGrid()
         setupBackNavigation()
 
@@ -265,6 +280,14 @@ class MainActivity : AppCompatActivity() {
         lifecycleScope.launch {
             repeatOnLifecycle(Lifecycle.State.STARTED) {
                 tunnelManager.status.collect { renderSubtleStatus(it) }
+            }
+        }
+
+        lifecycleScope.launch {
+            repeatOnLifecycle(Lifecycle.State.STARTED) {
+                VideoStreamSniffer.updatesFlow.collect {
+                    syncIdmIndicators()
+                }
             }
         }
     }
@@ -469,6 +492,50 @@ class MainActivity : AppCompatActivity() {
 
         binding.btnVoiceSearch.setOnClickListener { startVoiceRecognition() }
         binding.btnHomeVoice.setOnClickListener { startVoiceRecognition() }
+        binding.btnHomeLens.setOnClickListener {
+            navigateToUrlSafely("https://lens.google.com/")
+        }
+
+        binding.btnNewTabQuick.setOnClickListener {
+            dismissOmniboxSuggestions()
+            hideKeyboard()
+            tabManager.createTab(
+                BrowserTabManager.HOME_URL,
+                incognito = tabManager.activeTab?.incognito == true
+            )
+        }
+
+        binding.chipNtpIdmGrabber.setOnClickListener {
+            IdmAndChromeExtrasSheets.showIdmVideoGrabberSheet(this)
+        }
+        binding.chipNtpIncognito.setOnClickListener {
+            tabManager.createTab(BrowserTabManager.HOME_URL, incognito = true)
+        }
+        binding.chipNtpCustomize.setOnClickListener {
+            IdmAndChromeExtrasSheets.showChromeAppearanceSheet(this)
+        }
+
+        binding.btnIdmOmnibox.setOnClickListener {
+            dismissOmniboxSuggestions()
+            hideKeyboard()
+            IdmAndChromeExtrasSheets.showIdmVideoGrabberSheet(this)
+        }
+        binding.tvIdmFloatingLabel.setOnClickListener {
+            IdmAndChromeExtrasSheets.showIdmVideoGrabberSheet(this)
+        }
+        binding.btnDismissIdmPill.setOnClickListener {
+            tabManager.activeTab?.currentUrl?.let { url ->
+                dismissedIdmPageUrls.add(url)
+            }
+            binding.idmFloatingPill.visibility = View.GONE
+        }
+
+        binding.btnTtsToggle.setOnClickListener {
+            togglePauseListenToPage()
+        }
+        binding.btnTtsClose.setOnClickListener {
+            stopListenToPage()
+        }
 
         binding.btnReload.setOnClickListener {
             val tab = tabManager.activeTab ?: return@setOnClickListener
@@ -603,6 +670,11 @@ class MainActivity : AppCompatActivity() {
         val hasText = !binding.etUrl.text.isNullOrEmpty()
         binding.btnClearUrl.visibility = if (focused && hasText) View.VISIBLE else View.GONE
         binding.btnVoiceSearch.visibility = if (!focused || !hasText) View.VISIBLE else View.GONE
+
+        if (focused) {
+            binding.btnIdmOmnibox.visibility = View.GONE
+            binding.idmFloatingPill.visibility = View.GONE
+        }
 
         val tab = tabManager.activeTab
         if (focused && hasText) {
@@ -1204,12 +1276,7 @@ class MainActivity : AppCompatActivity() {
         val count = tabManager.tabs.size
         binding.btnTabs.text = if (count > 99) ":D" else count.toString()
 
-        val toolbarColor = if (tab.incognito) {
-            ContextCompat.getColor(this, R.color.gf_incognito_bar)
-        } else {
-            ContextCompat.getColor(this, R.color.gf_bg_surface)
-        }
-        binding.topToolbar.setBackgroundColor(toolbarColor)
+        applyChromeAppearanceLive()
 
         val isHome = tab.currentUrl == BrowserTabManager.HOME_URL
         if (isHome) {
@@ -1221,7 +1288,7 @@ class MainActivity : AppCompatActivity() {
                 applySmartOmniboxDirection(binding.etUrl, "")
                 programmaticUrlChange = false
                 binding.ivSslState.setImageResource(
-                    if (tab.incognito) R.drawable.ic_incognito else R.drawable.ic_search
+                    if (tab.incognito) R.drawable.ic_incognito else R.drawable.ic_google_g
                 )
             }
         } else {
@@ -1244,13 +1311,229 @@ class MainActivity : AppCompatActivity() {
 
                 when {
                     tab.currentUrl.startsWith("https://", ignoreCase = true) ->
-                        binding.ivSslState.setImageResource(R.drawable.ic_lock)
+                        binding.ivSslState.setImageResource(R.drawable.ic_chrome_tune)
                     else ->
                         binding.ivSslState.setImageResource(R.drawable.ic_info_outline)
                 }
             }
         }
         updateOmniboxAccessoryButtons()
+        syncIdmIndicators()
+    }
+
+    internal fun syncIdmIndicators() {
+        val tab = tabManager.activeTab
+        val isHome = tab == null || tab.currentUrl == BrowserTabManager.HOME_URL
+        val mediaCount = if (!isHome && tab != null) VideoStreamSniffer.getCountForTab(tab.id) else 0
+
+        if (mediaCount > 0 && !binding.etUrl.hasFocus()) {
+            binding.btnIdmOmnibox.text = "🎬 $mediaCount"
+            binding.btnIdmOmnibox.visibility = View.VISIBLE
+        } else {
+            binding.btnIdmOmnibox.visibility = View.GONE
+        }
+
+        val dismissedForUrl = tab != null && dismissedIdmPageUrls.contains(tab.currentUrl)
+        if (mediaCount > 0 && !isHome && !dismissedForUrl && !binding.etUrl.hasFocus()) {
+            binding.tvIdmFloatingLabel.text = "🎬 دانلود ویدیو ($mediaCount)"
+            binding.idmFloatingPill.visibility = View.VISIBLE
+        } else {
+            binding.idmFloatingPill.visibility = View.GONE
+        }
+    }
+
+    internal fun applyAddressBarPlacement() {
+        val root = binding.browserChromeRoot
+        val toolbar = binding.topToolbar
+        val divider = binding.toolbarDivider
+        val progress = binding.progressBar
+
+        root.removeView(toolbar)
+        root.removeView(divider)
+        root.removeView(progress)
+
+        if (dataStore.bottomAddressBar) {
+            root.addView(progress)
+            root.addView(divider)
+            root.addView(toolbar)
+            (binding.omniboxSuggestionsScroll.layoutParams as? FrameLayout.LayoutParams)?.let { lp ->
+                lp.gravity = Gravity.BOTTOM
+                lp.bottomMargin = (4 * resources.displayMetrics.density).toInt()
+                lp.topMargin = 0
+                binding.omniboxSuggestionsScroll.layoutParams = lp
+            }
+            (binding.idmFloatingPill.layoutParams as? FrameLayout.LayoutParams)?.let { lp ->
+                lp.gravity = Gravity.BOTTOM or Gravity.END
+                binding.idmFloatingPill.layoutParams = lp
+            }
+        } else {
+            root.addView(toolbar, 0)
+            root.addView(divider, 1)
+            root.addView(progress, 2)
+            (binding.omniboxSuggestionsScroll.layoutParams as? FrameLayout.LayoutParams)?.let { lp ->
+                lp.gravity = Gravity.TOP
+                lp.topMargin = (4 * resources.displayMetrics.density).toInt()
+                lp.bottomMargin = 0
+                binding.omniboxSuggestionsScroll.layoutParams = lp
+            }
+        }
+    }
+
+    internal fun applyChromeAppearanceLive() {
+        val tab = if (::tabManager.isInitialized) tabManager.activeTab else null
+        val isDark = (resources.configuration.uiMode and Configuration.UI_MODE_NIGHT_MASK) ==
+            Configuration.UI_MODE_NIGHT_YES
+        val themeChoice = dataStore.chromeColorTheme
+
+        if (tab?.incognito == true) {
+            binding.topToolbar.setBackgroundColor(ContextCompat.getColor(this, R.color.gf_incognito_bar))
+            binding.homeDashboard.setBackgroundColor(Color.parseColor("#202124"))
+            binding.omniboxContainer.setBackgroundResource(R.drawable.bg_omnibox)
+            return
+        }
+
+        if (themeChoice == ChromeColorTheme.DEFAULT) {
+            binding.topToolbar.setBackgroundColor(ContextCompat.getColor(this, R.color.gf_bg_surface))
+            binding.homeDashboard.setBackgroundColor(ContextCompat.getColor(this, R.color.gf_bg_primary))
+            binding.omniboxContainer.setBackgroundResource(R.drawable.bg_omnibox)
+        } else {
+            val surfColor = Color.parseColor(
+                if (isDark) themeChoice.darkSurfaceHex else themeChoice.lightSurfaceHex
+            )
+            val omniColor = if (isDark) {
+                Color.argb(
+                    255,
+                    (Color.red(surfColor) + 20).coerceAtMost(255),
+                    (Color.green(surfColor) + 20).coerceAtMost(255),
+                    (Color.blue(surfColor) + 20).coerceAtMost(255)
+                )
+            } else {
+                Color.WHITE
+            }
+            binding.topToolbar.setBackgroundColor(surfColor)
+            binding.homeDashboard.setBackgroundColor(surfColor)
+            binding.omniboxContainer.background = GradientDrawable().apply {
+                shape = GradientDrawable.RECTANGLE
+                cornerRadius = 22f * resources.displayMetrics.density
+                setColor(omniColor)
+            }
+        }
+    }
+
+    // =========================================================================
+    // Authentic Chrome 'Listen to this page' (Android TextToSpeech Engine)
+    // =========================================================================
+    internal fun startListenToCurrentPage(tab: BrowserTab) {
+        if (tab.currentUrl == BrowserTabManager.HOME_URL) return
+        tab.webView.extractReadablePageText { title, body ->
+            val fullText = buildString {
+                if (title.isNotBlank()) append(title).append(". ")
+                append(body)
+            }.trim()
+
+            if (fullText.length < 20) {
+                Toast.makeText(this, "متن کافی برای خواندن صوتی در این صفحه یافت نشد", Toast.LENGTH_SHORT).show()
+                return@extractReadablePageText
+            }
+
+            ttsChunks = fullText
+                .split(Regex("""(?<=[.!?؟。\n])\s+"""))
+                .map { it.trim() }
+                .filter { it.isNotEmpty() }
+                .flatMap { sentence -> sentence.chunked(320) }
+
+            if (ttsChunks.isEmpty()) return@extractReadablePageText
+            ttsChunkIndex = 0
+            ttsPaused = false
+
+            binding.ttsListenBar.visibility = View.VISIBLE
+            binding.tvTtsStatus.text = "درحال خواندن: ${title.ifBlank { tab.title }}"
+            binding.btnTtsToggle.text = "⏸ توقف"
+
+            val hasRtlScript = RTL_SCRIPT_REGEX.containsMatchIn(fullText.take(400))
+            val desiredLocale = if (hasRtlScript) Locale("fa", "IR") else Locale.US
+
+            if (textToSpeech == null) {
+                textToSpeech = TextToSpeech(applicationContext) { status ->
+                    runOnUiThread {
+                        if (status == TextToSpeech.SUCCESS) {
+                            configureAndSpeakTts(desiredLocale)
+                        } else {
+                            binding.ttsListenBar.visibility = View.GONE
+                            Toast.makeText(
+                                this,
+                                "موتور تبدیل متن به گفتار روی این دستگاه فعال نیست",
+                                Toast.LENGTH_LONG
+                            ).show()
+                        }
+                    }
+                }
+            } else {
+                configureAndSpeakTts(desiredLocale)
+            }
+        }
+    }
+
+    private fun configureAndSpeakTts(desiredLocale: Locale) {
+        val tts = textToSpeech ?: return
+        runCatching {
+            val res = tts.setLanguage(desiredLocale)
+            if (res == TextToSpeech.LANG_MISSING_DATA || res == TextToSpeech.LANG_NOT_SUPPORTED) {
+                tts.setLanguage(Locale.US)
+            }
+        }
+        tts.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
+            override fun onStart(utteranceId: String?) {}
+            override fun onError(utteranceId: String?) {}
+            override fun onDone(utteranceId: String?) {
+                runOnUiThread {
+                    if (!ttsPaused && binding.ttsListenBar.visibility == View.VISIBLE) {
+                        ttsChunkIndex++
+                        if (ttsChunkIndex < ttsChunks.size) {
+                            speakCurrentTtsChunk()
+                        } else {
+                            stopListenToPage()
+                        }
+                    }
+                }
+            }
+        })
+        speakCurrentTtsChunk()
+    }
+
+    private fun speakCurrentTtsChunk() {
+        val tts = textToSpeech ?: return
+        val chunk = ttsChunks.getOrNull(ttsChunkIndex) ?: run {
+            stopListenToPage()
+            return
+        }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
+            tts.speak(chunk, TextToSpeech.QUEUE_FLUSH, null, "chunk_$ttsChunkIndex")
+        } else {
+            @Suppress("DEPRECATION")
+            tts.speak(chunk, TextToSpeech.QUEUE_FLUSH, null)
+        }
+    }
+
+    private fun togglePauseListenToPage() {
+        val tts = textToSpeech ?: return
+        if (ttsPaused) {
+            ttsPaused = false
+            binding.btnTtsToggle.text = "⏸ توقف"
+            speakCurrentTtsChunk()
+        } else {
+            ttsPaused = true
+            tts.stop()
+            binding.btnTtsToggle.text = "▶ ادامه"
+        }
+    }
+
+    internal fun stopListenToPage() {
+        ttsPaused = false
+        ttsChunks = emptyList()
+        ttsChunkIndex = 0
+        runCatching { textToSpeech?.stop() }
+        binding.ttsListenBar.visibility = View.GONE
     }
 
     // =========================================================================
@@ -1733,7 +2016,8 @@ class MainActivity : AppCompatActivity() {
         userAgent: String,
         contentDisposition: String,
         mimeType: String,
-        sourceTab: BrowserTab? = null
+        sourceTab: BrowserTab? = null,
+        suggestedFileNameOverride: String = ""
     ) {
         val trimmed = url.trim()
         if (trimmed.isEmpty()) return
@@ -1742,7 +2026,9 @@ class MainActivity : AppCompatActivity() {
         if (trimmed.startsWith("blob:", ignoreCase = true)) {
             val targetTab = sourceTab ?: tabManager.activeTab
             if (targetTab != null) {
-                val guessedName = DownloadEngine.guessBestFileName(trimmed, contentDisposition, mimeType)
+                val guessedName = suggestedFileNameOverride.ifBlank {
+                    DownloadEngine.guessBestFileName(trimmed, contentDisposition, mimeType)
+                }
                 Toast.makeText(this, "📥 درحال دریافت فایل از صفحه…", Toast.LENGTH_SHORT).show()
                 targetTab.webView.downloadBlobUrl(trimmed, guessedName, mimeType)
             }
@@ -1758,7 +2044,8 @@ class MainActivity : AppCompatActivity() {
             userAgent = userAgent,
             contentDisposition = contentDisposition,
             mimeType = mimeType,
-            refererUrl = referer
+            refererUrl = referer,
+            suggestedFileNameOverride = suggestedFileNameOverride
         )
 
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q &&
@@ -1778,10 +2065,11 @@ class MainActivity : AppCompatActivity() {
             userAgent = args.userAgent,
             contentDisposition = args.contentDisposition,
             mimeType = args.mimeType,
-            refererUrl = args.refererUrl
+            refererUrl = args.refererUrl,
+            suggestedFileNameOverride = args.suggestedFileNameOverride
         )
         if (rec != null) {
-            Snackbar.make(binding.rootLayout, "📥 شروع دانلود: ${rec.fileName}", Snackbar.LENGTH_LONG)
+            Snackbar.make(binding.rootLayout, "📥 شروع دانلود IDM: ${rec.fileName}", Snackbar.LENGTH_LONG)
                 .setAction("مشاهده پیشرفت") {
                     ChromeFeaturesDialogs.showDownloadsSheet(this)
                 }
@@ -1797,6 +2085,11 @@ class MainActivity : AppCompatActivity() {
 
     override fun onDestroy() {
         suggestJob?.cancel()
+        runCatching {
+            textToSpeech?.stop()
+            textToSpeech?.shutdown()
+            textToSpeech = null
+        }
         downloadEngine.onDownloadEventToast = null
         tabManager.destroyAll()
         super.onDestroy()

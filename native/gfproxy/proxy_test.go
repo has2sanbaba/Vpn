@@ -905,3 +905,48 @@ func TestMultiSourceSeedsAndCustomConfigManagement(t *testing.T) {
 	}
 }
 
+func TestInMemoryJNIControlHandlerAndUTF8Safety(t *testing.T) {
+	doh := NewDoHResolver()
+	router := NewUpstreamRouter(doh, RuntimeConfig{Mode: ModeAntiDPI})
+	pool := NewNodePool(doh, t.TempDir())
+	pool.mu.Lock()
+	pool.probeHook = func(node OutboundNode) (int64, int64, bool) {
+		return 64, 31000, true
+	}
+	pool.mu.Unlock()
+
+	racer := NewConnectionRacer(router, pool, "")
+	gw := NewGatewayServer(router, doh, pool, racer)
+	mux := NewControlMux(gw, router, doh, "jni-secret")
+
+	// 1. Unauthorized token must fail cleanly without network sockets
+	unauth := InvokeControlHandlerInMemory(mux, http.MethodGet, "/status", "wrong-token", "")
+	if !strings.Contains(unauth, "unauthorized") {
+		t.Fatalf("expected unauthorized response, got %s", unauth)
+	}
+
+	// 2. Add custom node with 4-byte UTF-8 emojis (verifies CESU-8-free byte marshaling payload)
+	payload, _ := json.Marshal(map[string]string{
+		"input": "vless://b2f2f9f2-1864-48ea-839b-22815faff1f1@104.18.2.161:443?security=tls&type=ws&sni=sub.example.com&path=%2Fws#🚀آلمان-پرسرعت⚡",
+	})
+	rawAdd := InvokeControlHandlerInMemory(mux, http.MethodPost, "/custom/add", "jni-secret", string(payload))
+	var addRes CustomAddResult
+	if err := json.Unmarshal([]byte(rawAdd), &addRes); err != nil {
+		t.Fatalf("unmarshal addRes: %v (%s)", err, rawAdd)
+	}
+	if !addRes.OK || addRes.WorkingCount != 1 || !strings.Contains(addRes.BestNode, "🚀آلمان-پرسرعت⚡") {
+		t.Fatalf("unexpected JNI in-memory addRes: %+v", addRes)
+	}
+
+	// 3. Status check via in-memory JNI control plane
+	rawStatus := InvokeControlHandlerInMemory(mux, http.MethodGet, "/status", "jni-secret", "")
+	var st map[string]any
+	if err := json.Unmarshal([]byte(rawStatus), &st); err != nil {
+		t.Fatalf("unmarshal status: %v", err)
+	}
+	if st["ready"] != true {
+		t.Fatalf("expected ready=true, got %+v", st)
+	}
+}
+
+

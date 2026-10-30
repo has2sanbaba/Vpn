@@ -1,5 +1,6 @@
 package org.greatfire.browser.ui
 
+import android.app.DownloadManager
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
@@ -8,10 +9,8 @@ import android.graphics.Color
 import android.graphics.Typeface
 import android.graphics.drawable.ColorDrawable
 import android.net.Uri
-import android.os.Build
 import android.print.PrintAttributes
 import android.print.PrintManager
-import android.provider.Settings
 import android.text.Editable
 import android.text.InputType
 import android.text.TextUtils
@@ -242,6 +241,9 @@ object ChromeFeaturesDialogs {
                 itemsCol.addView(makeDivider(activity))
             }
             val mediaUrl = payload.mediaUrl
+            addActionRow(R.drawable.ic_video_grab, "باز کردن در دانلودر هوشمند ویدیو (IDM)") {
+                IdmAndChromeExtrasSheets.showIdmVideoGrabberSheet(activity)
+            }
             addActionRow(R.drawable.ic_download, "دانلود مستقیم ویدیو / فایل صوتی") {
                 activity.startManagedDownload(mediaUrl, "", "", "video/mp4", tab)
             }
@@ -423,8 +425,28 @@ object ChromeFeaturesDialogs {
         addMenuRow(R.drawable.ic_incognito, "تب ناشناس جدید") {
             activity.tabManager.createTab(BrowserTabManager.HOME_URL, incognito = true)
         }
+        addMenuRow(
+            R.drawable.ic_pin,
+            if (tab.pinned) "برداشتن پین تب" else "پین کردن تب",
+            checkedState = tab.pinned
+        ) {
+            val pinned = activity.tabManager.togglePinTab(tab)
+            Toast.makeText(
+                activity,
+                if (pinned) "📌 تب پین شد" else "پین تب برداشته شد",
+                Toast.LENGTH_SHORT
+            ).show()
+        }
         menuList.addView(makeDivider(activity))
 
+        val sniffedCount = org.greatfire.browser.media.VideoStreamSniffer.getCountForTab(tab.id)
+        addMenuRow(
+            R.drawable.ic_video_grab,
+            "دانلودر ویدیو و استریم (IDM)",
+            badge = if (sniffedCount > 0) "$sniffedCount ویدیو" else "آماده"
+        ) {
+            IdmAndChromeExtrasSheets.showIdmVideoGrabberSheet(activity)
+        }
         addMenuRow(R.drawable.ic_history, "تاریخچه") {
             showHistorySheet(activity)
         }
@@ -459,6 +481,12 @@ object ChromeFeaturesDialogs {
             addMenuRow(R.drawable.ic_translate, "ترجمه صفحه به فارسی") {
                 activity.translateCurrentPage(tab)
             }
+            addMenuRow(R.drawable.ic_volume_up, "خواندن صوتی این صفحه") {
+                activity.startListenToCurrentPage(tab)
+            }
+            addMenuRow(R.drawable.ic_reader, "حالت مطالعه تمیز (Reader Mode)") {
+                IdmAndChromeExtrasSheets.showChromeReaderModeSheet(activity, tab)
+            }
             addMenuRow(R.drawable.ic_add, "افزودن به صفحه اول") {
                 val host = runCatching { Uri.parse(tab.currentUrl).host.orEmpty().removePrefix("www.") }.getOrDefault("")
                 val badgeCh = host.firstOrNull()?.uppercaseChar()?.toString() ?: "W"
@@ -482,6 +510,9 @@ object ChromeFeaturesDialogs {
             menuList.addView(makeDivider(activity))
         }
 
+        addMenuRow(R.drawable.ic_palette, "ظاهر و رنگ‌بندی کروم") {
+            IdmAndChromeExtrasSheets.showChromeAppearanceSheet(activity)
+        }
         val st = activity.tunnelStatusSnapshot()
         val pingBadge = when {
             st.readyNodes > 0 && st.bestRttMs > 0 && st.activeSources > 1 ->
@@ -1027,11 +1058,12 @@ object ChromeFeaturesDialogs {
                 val statusText = when (d.state) {
                     DownloadState.DOWNLOADING -> {
                         val spd = if (d.speedBps > 0L) " • ${formatBytes(d.speedBps)}/s" else ""
-                        "⏳ در حال دانلود • $sizePart$spd"
+                        val hlsSegInfo = if (d.errorMsg.startsWith("قطعه ")) " (${d.errorMsg})" else ""
+                        "⏳ در حال دانلود$hlsSegInfo • $sizePart$spd"
                     }
                     DownloadState.PAUSED -> "⏸ متوقف شده • $sizePart"
                     DownloadState.COMPLETED -> {
-                        if (isApk) "✅ آماده نصب • ${formatBytes(d.bytesRead)}"
+                        if (isApk) "✅ ذخیره در پوشه Downloads • ${formatBytes(d.bytesRead)}"
                         else "✅ تکمیل شد • ${formatBytes(d.bytesRead)}"
                     }
                     DownloadState.CANCELED -> "✕ لغو شده"
@@ -1090,7 +1122,7 @@ object ChromeFeaturesDialogs {
                         }
                     }
                     DownloadState.COMPLETED -> {
-                        addActionChip(if (isApk) "📦 نصب برنامه" else "📂 باز کردن", R.color.gf_accent) {
+                        addActionChip(if (isApk) "📂 پوشه دانلودها" else "📂 باز کردن", R.color.gf_accent) {
                             openDownloadedFile(activity, d)
                         }
                         addActionChip("اشتراک‌گذاری", R.color.gf_text_primary) {
@@ -1123,7 +1155,7 @@ object ChromeFeaturesDialogs {
         dialog.show()
     }
 
-    private fun showNewDownloadByUrlDialog(activity: MainActivity) {
+    internal fun showNewDownloadByUrlDialog(activity: MainActivity) {
         val dp = activity.resources.displayMetrics.density
         val box = LinearLayout(activity).apply {
             orientation = LinearLayout.VERTICAL
@@ -1131,7 +1163,7 @@ object ChromeFeaturesDialogs {
             setPadding(p, (12 * dp).toInt(), p, (4 * dp).toInt())
         }
         val etUrl = EditText(activity).apply {
-            hint = "https://example.com/file.apk"
+            hint = "https://example.com/video.mp4 یا stream.m3u8"
             inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS
             textDirection = View.TEXT_DIRECTION_LTR
             setSingleLine()
@@ -1145,7 +1177,7 @@ object ChromeFeaturesDialogs {
         box.addView(etUrl)
 
         val dlg = AlertDialog.Builder(activity)
-            .setTitle("دانلود مستقیم با لینک (از تونل ضدسانسور)")
+            .setTitle("دانلود مستقیم فایل یا استریم m3u8 (شتاب‌دهنده IDM)")
             .setView(box)
             .setPositiveButton("شروع دانلود") { _, _ ->
                 val rawUrl = etUrl.text?.toString()?.trim().orEmpty()
@@ -1207,31 +1239,25 @@ object ChromeFeaturesDialogs {
     }
 
     private fun openDownloadedFile(activity: MainActivity, d: DownloadRecord) {
+        val mime = resolveDownloadMime(d)
+        // Google Play Protect Compliance: never invoke package-installer intents from inside browser;
+        // guide user to standard system Downloads app for .apk files.
+        if (mime == "application/vnd.android.package-archive") {
+            Toast.makeText(
+                activity,
+                "فایل در پوشه Downloads گوشی ذخیره شده است؛ از مدیریت فایل گوشی باز کنید.",
+                Toast.LENGTH_LONG
+            ).show()
+            runCatching {
+                activity.startActivity(Intent(DownloadManager.ACTION_VIEW_DOWNLOADS))
+            }
+            return
+        }
+
         val uri = resolveDownloadContentUri(activity, d)
         if (uri == null) {
             Toast.makeText(activity, "فایل روی حافظه یافت نشد (ممکن است جابه‌جا یا حذف شده باشد)", Toast.LENGTH_SHORT).show()
             return
-        }
-
-        val mime = resolveDownloadMime(d)
-        if (mime == "application/vnd.android.package-archive" && Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            val canInstall = runCatching { activity.packageManager.canRequestPackageInstalls() }.getOrDefault(true)
-            if (!canInstall) {
-                Toast.makeText(
-                    activity,
-                    "لطفاً مجوز نصب برنامه را فعال کنید و دوباره روی «نصب برنامه» بزنید",
-                    Toast.LENGTH_LONG
-                ).show()
-                runCatching {
-                    activity.startActivity(
-                        Intent(
-                            Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES,
-                            Uri.parse("package:${activity.packageName}")
-                        )
-                    )
-                }
-                return
-            }
         }
 
         val viewIntent = Intent(Intent.ACTION_VIEW).apply {
@@ -1300,7 +1326,7 @@ object ChromeFeaturesDialogs {
         }
 
         val secTitle = when {
-            isHome -> "صفحه شروع Dr Browser v5.0"
+            isHome -> "صفحه شروع Dr Browser v6.0"
             isHttps -> "🔒 اتصال به این سایت امن است (HTTPS)"
             else -> "ℹ اتصال این صفحه رمزگذاری نشده است (HTTP)"
         }
@@ -1382,7 +1408,7 @@ object ChromeFeaturesDialogs {
         scroll.addView(box)
 
         box.addView(TextView(activity).apply {
-            text = "⚙️ تنظیمات مرورگر (Dr Browser v5.0)"
+            text = "⚙️ تنظیمات مرورگر (Dr Browser v6.0)"
             setTextColor(ContextCompat.getColor(activity, R.color.gf_text_primary))
             textSize = 17.5f
             setTypeface(typeface, Typeface.BOLD)

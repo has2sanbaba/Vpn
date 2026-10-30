@@ -11,13 +11,15 @@ import android.webkit.WebResourceResponse
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import okhttp3.Request
-import org.greatfire.browser.vpn.LegacySslTrustBridge
+import org.greatfire.browser.media.VideoStreamSniffer
 import org.greatfire.browser.vpn.TunnelManager
 import java.io.ByteArrayInputStream
 import java.nio.charset.Charset
 import java.util.Locale
 
 class EnvoyWebViewClient(
+    private val tabIdProvider: () -> String,
+    private val pageMetaProvider: () -> Pair<String, String>,
     private val tunnelManager: TunnelManager,
     private val onUrlChanged: (WebView, String) -> Unit,
     private val onLoadingStateChanged: (WebView, Boolean) -> Unit,
@@ -46,7 +48,6 @@ class EnvoyWebViewClient(
             return false
         }
 
-        // Authentic Chrome handling for intent:// links with browser_fallback_url security hardening
         if (scheme == "intent") {
             return runCatching {
                 val parsed = Intent.parseUri(url, Intent.URI_INTENT_SCHEME).apply {
@@ -69,7 +70,6 @@ class EnvoyWebViewClient(
             }.getOrDefault(true)
         }
 
-        // Handle tel:, mailto:, sms:, geo:, market: safely via external system chooser
         if (scheme in EXTERNAL_SAFE_SCHEMES) {
             runCatching {
                 val extIntent = Intent(Intent.ACTION_VIEW, Uri.parse(url)).apply {
@@ -100,6 +100,17 @@ class EnvoyWebViewClient(
             )
         }
 
+        // IDM Network Layer Sniffer: inspect request URL on WebView IO thread (non-blocking & zero latency!)
+        if (!request.isForMainFrame) {
+            val (pageUrl, pageTitle) = pageMetaProvider()
+            VideoStreamSniffer.recordCandidate(
+                tabId = tabIdProvider(),
+                rawUrl = uri.toString(),
+                pageUrl = pageUrl,
+                pageTitle = pageTitle
+            )
+        }
+
         if (WebViewProxyConfigurator.requiresClientInterception &&
             request.method.equals("GET", ignoreCase = true) &&
             !request.requestHeaders.containsKey("Range") &&
@@ -125,6 +136,17 @@ class EnvoyWebViewClient(
             val mime = if (mediaType != null) "${mediaType.type}/${mediaType.subtype}" else "text/html"
             val charset = mediaType?.charset(Charset.forName("UTF-8"))?.name() ?: "utf-8"
 
+            if (mime.startsWith("video/") || mime.startsWith("audio/") || mime.contains("mpegurl")) {
+                val (pageUrl, pageTitle) = pageMetaProvider()
+                VideoStreamSniffer.recordCandidate(
+                    tabId = tabIdProvider(),
+                    rawUrl = request.url.toString(),
+                    pageUrl = pageUrl,
+                    pageTitle = pageTitle,
+                    mimeHint = mime
+                )
+            }
+
             val headersMap = LinkedHashMap<String, String>()
             for (i in 0 until resp.headers.size) {
                 headersMap[resp.headers.name(i)] = resp.headers.value(i)
@@ -145,10 +167,10 @@ class EnvoyWebViewClient(
 
     override fun onPageStarted(view: WebView, url: String?, favicon: Bitmap?) {
         super.onPageStarted(view, url, favicon)
-        if (tunnelManager.webRtcShieldEnabled) {
-            view.evaluateJavascript(WEBRTC_SHIELD_JS, null)
-        }
         if (!url.isNullOrBlank() && url != "about:blank") {
+            if (url.startsWith("http://", true) || url.startsWith("https://", true)) {
+                VideoStreamSniffer.onMainFramePageStarted(tabIdProvider(), url)
+            }
             onUrlChanged(view, url)
         }
         if (url != "about:blank") {
@@ -172,18 +194,15 @@ class EnvoyWebViewClient(
             onUrlChanged(view, url)
             if (url != BrowserTabManager.HOME_URL) {
                 onHistoryVisited?.invoke(view.title.orEmpty(), url)
+                view.evaluateJavascript(VideoStreamSniffer.IDM_PAGE_SNIFFER_JS, null)
             }
         }
         onLoadingStateChanged(view, false)
     }
 
     override fun onReceivedSslError(view: WebView, handler: SslErrorHandler, error: SslError) {
-        val host = runCatching { Uri.parse(error.url).host }.getOrNull()
-        if (LegacySslTrustBridge.verifyLegacyWebViewSslError(error, host)) {
-            handler.proceed()
-        } else {
-            handler.cancel()
-        }
+        // Strict Google Play / Play Protect security compliance: never proceed past invalid TLS certificates
+        handler.cancel()
     }
 
     override fun onReceivedError(
@@ -222,14 +241,5 @@ class EnvoyWebViewClient(
             "scorecardresearch.com",
             "criteo.com"
         )
-
-        const val WEBRTC_SHIELD_JS = """
-            (function() {
-                try {
-                    Object.defineProperty(window, 'RTCPeerConnection', { value: undefined, writable: false });
-                    Object.defineProperty(window, 'webkitRTCPeerConnection', { value: undefined, writable: false });
-                } catch (_) {}
-            })();
-        """
     }
 }

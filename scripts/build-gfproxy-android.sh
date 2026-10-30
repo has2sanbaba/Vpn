@@ -48,10 +48,11 @@ fi
 
 HOST_TAG="$(ls -1 "$NDK_DIR/toolchains/llvm/prebuilt" | head -n 1)"
 TOOLCHAIN_BIN="$NDK_DIR/toolchains/llvm/prebuilt/$HOST_TAG/bin"
+LLVM_NM="$TOOLCHAIN_BIN/llvm-nm"
+LLVM_READELF="$TOOLCHAIN_BIN/llvm-readelf"
 
 echo "[build-gfproxy] Using Android NDK: $NDK_DIR ($HOST_TAG)"
 
-# Clean any leftover heavy binaries from previous versions
 rm -rf "$JNI_DIR"
 mkdir -p "$JNI_DIR"
 
@@ -72,7 +73,7 @@ build_for_abi() {
     local cxx_path="${cc_path}++"
     local gf_out="$out_dir/libgfproxy.so"
 
-    echo "[build-gfproxy] Building lightweight GreatFire FreeBrowser/Envoy engine libgfproxy.so ($abi, minSdk=21, 16KB page-aligned)..."
+    echo "[build-gfproxy] Building standard Android JNI C-shared library libgfproxy.so ($abi, minSdk=21, 16KB page-aligned)..."
     (
         cd "$SRC_DIR"
         env \
@@ -85,13 +86,30 @@ build_for_abi() {
             CC="$cc_path" \
             CXX="$cxx_path" \
             go build \
-                -buildmode=pie \
+                -buildmode=c-shared \
                 -trimpath \
                 -ldflags="-s -w -buildid= -extldflags=-Wl,-z,max-page-size=16384" \
                 -o "$gf_out" \
                 .
     )
-    chmod 0755 "$gf_out"
+
+    # Remove generated C header so only pure .so shared libraries are packaged into APK
+    rm -f "$out_dir/libgfproxy.h"
+    chmod 0644 "$gf_out"
+
+    if [[ -x "$LLVM_NM" ]]; then
+        "$LLVM_NM" -D "$gf_out" | grep -Fq "Java_org_greatfire_browser_vpn_NativeProxyBridge_nativeStart" || {
+            echo "ERROR: JNI symbol missing in $gf_out" >&2
+            exit 1
+        }
+    fi
+    if [[ -x "$LLVM_READELF" ]]; then
+        if "$LLVM_READELF" -d "$gf_out" | grep -Fq "TEXTREL"; then
+            echo "ERROR: Forbidden DT_TEXTREL found in $gf_out" >&2
+            exit 1
+        fi
+    fi
+
     ls -lh "$gf_out"
 }
 
@@ -101,4 +119,4 @@ build_for_abi "arm64-v8a"   "arm64" ""  "aarch64-linux-android21-clang"
 build_for_abi "x86"         "386"   ""  "i686-linux-android21-clang"
 build_for_abi "x86_64"      "amd64" ""  "x86_64-linux-android21-clang"
 
-echo "[build-gfproxy] Successfully built ultra-lightweight libgfproxy.so for all 4 Android ABIs!"
+echo "[build-gfproxy] Successfully built standard JNI libgfproxy.so for all 4 Android ABIs!"

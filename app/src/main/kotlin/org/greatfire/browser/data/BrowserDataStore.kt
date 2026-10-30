@@ -86,10 +86,31 @@ enum class ThemeModePref(val displayName: String, val nightMode: Int) {
     }
 }
 
+enum class ChromeColorTheme(
+    val displayName: String,
+    val lightToolbarHex: String,
+    val lightPillHex: String,
+    val darkToolbarHex: String,
+    val darkPillHex: String,
+    val accentHex: String
+) {
+    DEFAULT("پیش‌فرض گوگل کروم", "#FFFFFF", "#F1F3F4", "#202124", "#303134", "#1A73E8"),
+    OCEAN_BLUE("آبی اقیانوسی (Material You)", "#EEF4FF", "#DDE9FF", "#1B2230", "#263145", "#1A73E8"),
+    EMERALD_MINT("سبز زمردی", "#EDF7F2", "#D9EFE4", "#192620", "#24372E", "#188038"),
+    ROYAL_VIOLET("بنفش کروم", "#F5EEFF", "#E8DCFA", "#231C2E", "#322842", "#7B1FA2"),
+    WARM_SUNSET("شنی گرم", "#FFF4EC", "#FBE6D7", "#2B201A", "#3B2D25", "#C5511E");
+
+    companion object {
+        fun fromName(name: String?): ChromeColorTheme =
+            entries.firstOrNull { it.name.equals(name, ignoreCase = true) } ?: DEFAULT
+    }
+}
+
 data class SavedSessionTab(
     val title: String,
     val url: String,
-    val desktopMode: Boolean = false
+    val desktopMode: Boolean = false,
+    val pinned: Boolean = false
 )
 
 class BrowserDataStore private constructor(context: Context) {
@@ -128,6 +149,14 @@ class BrowserDataStore private constructor(context: Context) {
     var defaultDesktopMode: Boolean
         get() = prefs.getBoolean(KEY_DEFAULT_DESKTOP, false)
         set(value) = prefs.edit().putBoolean(KEY_DEFAULT_DESKTOP, value).apply()
+
+    var bottomAddressBar: Boolean
+        get() = prefs.getBoolean(KEY_BOTTOM_ADDRESS_BAR, false)
+        set(value) = prefs.edit().putBoolean(KEY_BOTTOM_ADDRESS_BAR, value).apply()
+
+    var chromeColorTheme: ChromeColorTheme
+        get() = ChromeColorTheme.fromName(prefs.getString(KEY_CHROME_COLOR_THEME, ChromeColorTheme.DEFAULT.name))
+        set(value) = prefs.edit().putString(KEY_CHROME_COLOR_THEME, value.name).apply()
 
     // ---------------- Bookmarks ----------------
 
@@ -518,6 +547,7 @@ class BrowserDataStore private constructor(context: Context) {
                     put("title", t.title)
                     put("url", t.url)
                     put("desktopMode", t.desktopMode)
+                    put("pinned", t.pinned)
                 }
             )
         }
@@ -541,7 +571,8 @@ class BrowserDataStore private constructor(context: Context) {
                             SavedSessionTab(
                                 title = o.optString("title", "تب جدید"),
                                 url = url,
-                                desktopMode = o.optBoolean("desktopMode", false)
+                                desktopMode = o.optBoolean("desktopMode", false),
+                                pinned = o.optBoolean("pinned", false)
                             )
                         )
                     }
@@ -562,6 +593,8 @@ class BrowserDataStore private constructor(context: Context) {
         private const val KEY_COOKIES_ENABLED = "cookies_enabled"
         private const val KEY_BLOCK_POPUPS = "block_popups"
         private const val KEY_DEFAULT_DESKTOP = "default_desktop"
+        private const val KEY_BOTTOM_ADDRESS_BAR = "bottom_address_bar"
+        private const val KEY_CHROME_COLOR_THEME = "chrome_color_theme"
         private const val KEY_BOOKMARKS = "bookmarks_json"
         private const val KEY_HISTORY = "history_json"
         private const val KEY_CLOSED_TABS = "closed_tabs_json"

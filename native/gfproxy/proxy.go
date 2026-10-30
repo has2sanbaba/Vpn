@@ -58,6 +58,10 @@ func (g *GatewayServer) ListenAndServe(listenAddr string) error {
 	if err != nil {
 		return err
 	}
+	return g.ServeListener(ln)
+}
+
+func (g *GatewayServer) ServeListener(ln net.Listener) error {
 	g.listener = ln
 	log.Printf("[gfproxy] Instant FreeBrowser/Envoy gateway listening on %s", ln.Addr().String())
 
@@ -737,4 +741,58 @@ func NewControlMux(gw *GatewayServer, router *UpstreamRouter, doh *DoHResolver, 
 	})
 
 	return mux
+}
+
+type inMemoryResponseWriter struct {
+	header http.Header
+	body   strings.Builder
+	status int
+}
+
+func (w *inMemoryResponseWriter) Header() http.Header {
+	if w.header == nil {
+		w.header = make(http.Header)
+	}
+	return w.header
+}
+
+func (w *inMemoryResponseWriter) WriteHeader(statusCode int) {
+	if w.status == 0 {
+		w.status = statusCode
+	}
+}
+
+func (w *inMemoryResponseWriter) Write(p []byte) (int, error) {
+	if w.status == 0 {
+		w.status = http.StatusOK
+	}
+	return w.body.Write(p)
+}
+
+// InvokeControlHandlerInMemory executes a control API request directly in memory (via JNI)
+// without opening or exposing any extra localhost TCP port.
+func InvokeControlHandlerInMemory(handler http.Handler, method, path, body string) (int, string) {
+	if handler == nil {
+		return http.StatusServiceUnavailable, `{"ok":false,"error":"engine not started"}`
+	}
+	if method == "" {
+		method = http.MethodGet
+	}
+	if !strings.HasPrefix(path, "/") {
+		path = "/" + path
+	}
+	req, err := http.NewRequest(method, "http://inproc.local"+path, strings.NewReader(body))
+	if err != nil {
+		return http.StatusBadRequest, fmt.Sprintf(`{"ok":false,"error":%q}`, err.Error())
+	}
+	if body != "" {
+		req.Header.Set("Content-Type", "application/json")
+	}
+	rw := &inMemoryResponseWriter{header: make(http.Header)}
+	handler.ServeHTTP(rw, req)
+	code := rw.status
+	if code == 0 {
+		code = http.StatusOK
+	}
+	return code, rw.body.String()
 }

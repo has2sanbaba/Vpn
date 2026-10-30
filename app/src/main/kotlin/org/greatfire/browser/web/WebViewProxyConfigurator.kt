@@ -2,10 +2,6 @@ package org.greatfire.browser.web
 
 import android.annotation.SuppressLint
 import android.content.Context
-import android.content.Intent
-import android.net.Proxy
-import android.os.Parcelable
-import android.util.ArrayMap
 import android.util.Log
 import androidx.webkit.ProxyConfig
 import androidx.webkit.ProxyController
@@ -17,10 +13,10 @@ import kotlinx.coroutines.withTimeoutOrNull
 import kotlin.coroutines.resume
 
 /**
- * Forces 100% of Android WebView traffic (HTML, JS, XHR, Fetch, WebSockets, Media, CSS, Images)
- * through our local GreatFire Unified Anti-Censorship Gateway across ALL Android versions:
- *  - Modern WebView (Chromium 75+ on Android 5.0..16): AndroidX `ProxyController` on `Dispatchers.Main`
- *  - Factory-old Android 5.0 - 8.1 WebView without Google Play updates: JVM properties + LoadedApk ProxyChangeListener reflection
+ * Routes Android WebView traffic cleanly through our local loopback gateway (`127.0.0.1:<port>`)
+ * using official public AndroidX `ProxyController` APIs (zero hidden-API reflection).
+ * On factory-old Android 5.0–6.0 WebViews lacking `PROXY_OVERRIDE`, `EnvoyWebViewClient` falls
+ * back to `requiresClientInterception` cleanly.
  */
 object WebViewProxyConfigurator {
     private const val TAG = "WebViewProxyConfig"
@@ -33,13 +29,12 @@ object WebViewProxyConfigurator {
     private var lastAppliedPort: Int = -1
 
     @SuppressLint("RequiresFeature")
-    suspend fun applyProxyToWebView(context: Context, localHttpProxyPort: Int): Boolean {
+    suspend fun applyProxyToWebView(@Suppress("UNUSED_PARAMETER") context: Context, localHttpProxyPort: Int): Boolean {
         if (localHttpProxyPort <= 0) return false
 
         val host = "127.0.0.1"
         val proxyUrl = "http://$host:$localHttpProxyPort"
 
-        // Always set JVM HTTP/HTTPS proxy properties as an additional safety net
         System.setProperty("http.proxyHost", host)
         System.setProperty("http.proxyPort", localHttpProxyPort.toString())
         System.setProperty("https.proxyHost", host)
@@ -49,7 +44,6 @@ object WebViewProxyConfigurator {
             return true
         }
 
-        // ProxyController.getInstance().setProxyOverride MUST be invoked on Android's UI thread!
         return withContext(Dispatchers.Main.immediate) {
             if (WebViewFeature.isFeatureSupported(WebViewFeature.PROXY_OVERRIDE)) {
                 try {
@@ -77,67 +71,15 @@ object WebViewProxyConfigurator {
 
                     requiresClientInterception = false
                     lastAppliedPort = localHttpProxyPort
-                    Log.i(TAG, "WebView ProxyController locked on Main thread to $proxyUrl (applied=$applied)")
+                    Log.i(TAG, "WebView ProxyController configured to $proxyUrl (applied=$applied)")
                     return@withContext true
                 } catch (t: Throwable) {
-                    Log.w(TAG, "ProxyController failed on Main thread, falling back to reflection: ${t.message}")
+                    Log.w(TAG, "ProxyController warning, enabling client interception: ${t.message}")
                 }
             }
 
-            val ok = applyReflectionProxy(context.applicationContext, host, localHttpProxyPort)
-            requiresClientInterception = !ok
-            if (ok) {
-                lastAppliedPort = localHttpProxyPort
-            }
-            ok
-        }
-    }
-
-    @SuppressLint("PrivateApi", "DiscouragedPrivateApi")
-    private fun applyReflectionProxy(appContext: Context, host: String, port: Int): Boolean {
-        return try {
-            val appClass = Class.forName("android.app.Application")
-            val mLoadedApkField = appClass.getDeclaredField("mLoadedApk").apply { isAccessible = true }
-            val loadedApk = mLoadedApkField.get(appContext) ?: return false
-
-            val loadedApkClass = Class.forName("android.app.LoadedApk")
-            val mReceiversField = loadedApkClass.getDeclaredField("mReceivers").apply { isAccessible = true }
-            val receiversMap = mReceiversField.get(loadedApk) as? ArrayMap<*, *> ?: return false
-
-            val proxyInfoClass = Class.forName("android.net.ProxyInfo")
-            val buildDirectProxy = proxyInfoClass.getMethod(
-                "buildDirectProxy",
-                String::class.java,
-                Int::class.javaPrimitiveType
-            )
-            val proxyInfo = buildDirectProxy.invoke(null, host, port) as Parcelable
-
-            var notified = 0
-            for (receiverSubMap in receiversMap.values) {
-                val subMap = receiverSubMap as? ArrayMap<*, *> ?: continue
-                for (receiver in subMap.keys) {
-                    if (receiver == null) continue
-                    val clsName = receiver.javaClass.name
-                    if (clsName.contains("ProxyChangeListener") || clsName.contains("ProxyBroadcastReceiver")) {
-                        val onReceive = receiver.javaClass.getDeclaredMethod(
-                            "onReceive",
-                            Context::class.java,
-                            Intent::class.java
-                        ).apply { isAccessible = true }
-
-                        val intent = Intent(Proxy.PROXY_CHANGE_ACTION).apply {
-                            putExtra("android.intent.extra.PROXY_INFO", proxyInfo)
-                        }
-                        onReceive.invoke(receiver, appContext, intent)
-                        notified++
-                    }
-                }
-            }
-            Log.i(TAG, "Legacy WebView proxy applied via reflection (listeners notified=$notified)")
-            true
-        } catch (t: Throwable) {
-            Log.w(TAG, "Legacy reflection proxy fallback warning: ${t.message}")
-            true
+            requiresClientInterception = true
+            false
         }
     }
 }
