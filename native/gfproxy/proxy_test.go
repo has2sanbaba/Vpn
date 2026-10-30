@@ -952,8 +952,8 @@ func TestInMemoryJNIControlHandlerAndUTF8Safety(t *testing.T) {
 	if err := json.Unmarshal([]byte(rawStatus), &st); err != nil {
 		t.Fatalf("unmarshal status: %v", err)
 	}
-	if st["ready"] != true {
-		t.Fatalf("expected ready=true, got %+v", st)
+	if st["ok"] != true || st["best_node"] != "🚀آلمان-پرسرعت⚡" {
+		t.Fatalf("expected ok=true and emoji best_node, got %+v", st)
 	}
 }
 
