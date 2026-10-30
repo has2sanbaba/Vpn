@@ -1398,18 +1398,11 @@ class MainActivity : AppCompatActivity() {
             binding.omniboxContainer.setBackgroundResource(R.drawable.bg_omnibox)
         } else {
             val surfColor = Color.parseColor(
-                if (isDark) themeChoice.darkSurfaceHex else themeChoice.lightSurfaceHex
+                if (isDark) themeChoice.darkToolbarHex else themeChoice.lightToolbarHex
             )
-            val omniColor = if (isDark) {
-                Color.argb(
-                    255,
-                    (Color.red(surfColor) + 20).coerceAtMost(255),
-                    (Color.green(surfColor) + 20).coerceAtMost(255),
-                    (Color.blue(surfColor) + 20).coerceAtMost(255)
-                )
-            } else {
-                Color.WHITE
-            }
+            val omniColor = Color.parseColor(
+                if (isDark) themeChoice.darkPillHex else themeChoice.lightPillHex
+            )
             binding.topToolbar.setBackgroundColor(surfColor)
             binding.homeDashboard.setBackgroundColor(surfColor)
             binding.omniboxContainer.background = GradientDrawable().apply {
