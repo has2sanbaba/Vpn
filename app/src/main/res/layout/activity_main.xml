@@ -32,7 +32,7 @@
                 android:padding="8dp"
                 app:srcCompat="@drawable/ic_home" />
 
-            <!-- Authentic Chrome Pill Omnibox -->
+            <!-- Authentic Chrome Pill Omnibox (Fixed for smooth Persian + English + URL editing) -->
             <LinearLayout
                 android:id="@+id/omniboxContainer"
                 android:layout_width="0dp"
@@ -62,11 +62,13 @@
                     android:layout_marginStart="4dp"
                     android:layout_weight="1"
                     android:background="@null"
+                    android:ellipsize="end"
+                    android:gravity="center_vertical|start"
                     android:hint="@string/omnibox_hint"
                     android:imeOptions="actionGo|flagNoExtractUi"
                     android:importantForAutofill="no"
-                    android:inputType="textUri|textNoSuggestions"
-                    android:selectAllOnFocus="true"
+                    android:inputType="text|textNoSuggestions"
+                    android:maxLines="1"
                     android:singleLine="true"
                     android:textColor="@color/gf_text_primary"
                     android:textColorHint="@color/gf_text_secondary"
@@ -78,6 +80,8 @@
                     android:layout_height="30dp"
                     android:background="?attr/selectableItemBackgroundBorderless"
                     android:contentDescription="Clear"
+                    android:focusable="false"
+                    android:focusableInTouchMode="false"
                     android:padding="5dp"
                     android:visibility="gone"
                     app:srcCompat="@drawable/ic_close" />
@@ -88,6 +92,8 @@
                     android:layout_height="30dp"
                     android:background="?attr/selectableItemBackgroundBorderless"
                     android:contentDescription="Voice Search"
+                    android:focusable="false"
+                    android:focusableInTouchMode="false"
                     android:padding="5dp"
                     app:srcCompat="@drawable/ic_mic" />
 
@@ -96,12 +102,14 @@
                     android:layout_width="32dp"
                     android:layout_height="32dp"
                     android:background="?attr/selectableItemBackgroundBorderless"
-                    android:contentDescription="Reload"
+                    android:contentDescription="Reload or Go"
+                    android:focusable="false"
+                    android:focusableInTouchMode="false"
                     android:padding="5dp"
                     app:srcCompat="@drawable/ic_refresh" />
             </LinearLayout>
 
-            <!-- Chrome Square Tab Switcher Counter (Tap = Grid Tabs, Long-Press = Quick Menu) -->
+            <!-- Chrome Square Tab Switcher Counter -->
             <TextView
                 android:id="@+id/btnTabs"
                 android:layout_width="26dp"
@@ -143,7 +151,7 @@
             android:progressTint="@color/gf_accent"
             android:visibility="gone" />
 
-        <!-- Authentic Chrome Find-in-Page Bar (with Match Counter + Prev/Next + Close) -->
+        <!-- Authentic Chrome Find-in-Page Bar -->
         <LinearLayout
             android:id="@+id/findInPageBar"
             android:layout_width="match_parent"
@@ -208,7 +216,7 @@
                 app:srcCompat="@drawable/ic_close" />
         </LinearLayout>
 
-        <!-- Main Browser Viewport + Chrome New Tab Page + Live Autocomplete Overlay -->
+        <!-- Main Browser Viewport + Chrome New Tab Page + Unified Omnibox Dropdown -->
         <FrameLayout
             android:id="@+id/contentFrame"
             android:layout_width="match_parent"
@@ -240,11 +248,10 @@
                     android:gravity="center_horizontal"
                     android:orientation="vertical"
                     android:paddingStart="20dp"
-                    android:paddingTop="44dp"
+                    android:paddingTop="40dp"
                     android:paddingEnd="20dp"
                     android:paddingBottom="24dp">
 
-                    <!-- Authentic Google / Chrome Wordmark -->
                     <TextView
                         android:id="@+id/tvBrandLogo"
                         android:layout_width="wrap_content"
@@ -256,12 +263,15 @@
                         android:textSize="42sp"
                         android:textStyle="bold" />
 
-                    <!-- Centered Chrome Search Pill with Voice Search -->
+                    <!-- Authentic Chrome NTP Search Fakebox (focuses top Omnibox cleanly without split-brain!) -->
                     <LinearLayout
+                        android:id="@+id/homeSearchBox"
                         android:layout_width="match_parent"
                         android:layout_height="52dp"
                         android:layout_marginTop="24dp"
                         android:background="@drawable/bg_omnibox"
+                        android:clickable="true"
+                        android:focusable="true"
                         android:gravity="center_vertical"
                         android:orientation="horizontal"
                         android:paddingStart="16dp"
@@ -273,20 +283,16 @@
                             android:contentDescription="Search"
                             app:srcCompat="@drawable/ic_search" />
 
-                        <EditText
-                            android:id="@+id/etHomeSearch"
+                        <TextView
+                            android:id="@+id/tvHomeSearchHint"
                             android:layout_width="0dp"
-                            android:layout_height="match_parent"
+                            android:layout_height="wrap_content"
                             android:layout_marginStart="10dp"
                             android:layout_weight="1"
-                            android:background="@null"
-                            android:hint="@string/home_search_hint"
-                            android:imeOptions="actionSearch|flagNoExtractUi"
-                            android:importantForAutofill="no"
-                            android:inputType="textUri|textNoSuggestions"
-                            android:singleLine="true"
-                            android:textColor="@color/gf_text_primary"
-                            android:textColorHint="@color/gf_text_secondary"
+                            android:ellipsize="end"
+                            android:maxLines="1"
+                            android:text="@string/home_search_hint"
+                            android:textColor="@color/gf_text_secondary"
                             android:textSize="15sp" />
 
                         <ImageButton
@@ -312,7 +318,7 @@
                         android:layout_height="0dp"
                         android:layout_weight="1" />
 
-                    <!-- Clean Smart Proxy Pill (1-tap switch to fastest server or open settings) -->
+                    <!-- Multi-Source Smart Proxy Bar -->
                     <LinearLayout
                         android:id="@+id/proxyQuickBar"
                         android:layout_width="match_parent"
@@ -333,7 +339,7 @@
                             android:layout_weight="1"
                             android:ellipsize="end"
                             android:maxLines="1"
-                            android:text="● درحال انتخاب سریع‌ترین پروکسی…"
+                            android:text="● درحال جستجو از ۱۰ منبع پروکسی…"
                             android:textColor="@color/gf_text_secondary"
                             android:textSize="12sp" />
 
@@ -356,24 +362,30 @@
                 </LinearLayout>
             </ScrollView>
 
-            <!-- Chrome Omnibox Live Autocomplete & History/Bookmark Suggestions Dropdown -->
-            <LinearLayout
-                android:id="@+id/omniboxSuggestionsContainer"
+            <!-- Scrollable Chrome Omnibox Dropdown (Page Copy/Share/Edit + Clipboard Paste & Go + Live Suggest) -->
+            <ScrollView
+                android:id="@+id/omniboxSuggestionsScroll"
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
                 android:layout_marginStart="8dp"
                 android:layout_marginTop="4dp"
                 android:layout_marginEnd="8dp"
                 android:background="@drawable/bg_chrome_menu"
-                android:elevation="8dp"
-                android:orientation="vertical"
-                android:paddingTop="4dp"
-                android:paddingBottom="4dp"
-                android:visibility="gone" />
+                android:elevation="10dp"
+                android:visibility="gone">
+
+                <LinearLayout
+                    android:id="@+id/omniboxSuggestionsContainer"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:orientation="vertical"
+                    android:paddingTop="4dp"
+                    android:paddingBottom="4dp" />
+            </ScrollView>
         </FrameLayout>
     </LinearLayout>
 
-    <!-- Fullscreen HTML5 Video Container (YouTube, etc.) -->
+    <!-- Fullscreen HTML5 Video Container -->
     <FrameLayout
         android:id="@+id/fullscreenContainer"
         android:layout_width="match_parent"

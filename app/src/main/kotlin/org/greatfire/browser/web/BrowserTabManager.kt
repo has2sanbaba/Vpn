@@ -44,12 +44,14 @@ class BrowserTabManager(
     private val dataStore: BrowserDataStore,
     private val onTabStateUpdated: () -> Unit,
     private val onProgressChanged: (Int) -> Unit,
-    private val onDownloadRequested: (url: String, userAgent: String, contentDisposition: String, mimeType: String) -> Unit,
+    private val onDownloadRequested: (tab: BrowserTab, url: String, userAgent: String, contentDisposition: String, mimeType: String) -> Unit,
+    private val onBlobDataReceived: ((dataUrl: String, fileName: String, mimeType: String) -> Unit)? = null,
     private val onContextMenuRequested: (BrowserTab, WebContextMenuPayload) -> Unit,
     private val onFileChooserRequested: ((ValueCallback<Array<Uri>>, WebChromeClient.FileChooserParams?) -> Boolean)? = null,
     private val onWebSearchSelected: ((String) -> Unit)? = null,
     private val onTranslateSelected: ((String) -> Unit)? = null,
     private val onWebViewTouchDown: (() -> Unit)? = null,
+    private val onMainFrameError: ((BrowserTab, String) -> Unit)? = null,
     private val onEnterFullscreen: ((View, WebChromeClient.CustomViewCallback) -> Unit)? = null,
     private val onExitFullscreen: (() -> Unit)? = null
 ) {
@@ -143,21 +145,31 @@ class BrowserTabManager(
         webView.onTranslateSelectedText = { text ->
             onTranslateSelected?.invoke(text)
         }
+        webView.onBlobBase64Fetched = { dataUrl, fileName, mime ->
+            onBlobDataReceived?.invoke(dataUrl, fileName, mime)
+        }
 
         webView.webViewClient = EnvoyWebViewClient(
             tunnelManager = tunnelManager,
             onUrlChanged = { _, newUrl ->
-                tabRef.currentUrl = newUrl
-                persistSessionQuietly()
-                onTabStateUpdated()
+                if (newUrl != "about:blank") {
+                    tabRef.currentUrl = newUrl
+                    persistSessionQuietly()
+                    onTabStateUpdated()
+                }
             },
             onLoadingStateChanged = { _, loading ->
                 tabRef.isLoading = loading
                 onTabStateUpdated()
             },
             onHistoryVisited = { pageTitle, visitedUrl ->
-                if (!tabRef.incognito) {
+                if (!tabRef.incognito && visitedUrl != "about:blank" && visitedUrl != HOME_URL) {
                     dataStore.recordHistoryVisit(pageTitle.ifBlank { tabRef.title }, visitedUrl)
+                }
+            },
+            onMainFrameNetworkError = { _, failingUrl ->
+                if (tabRef === activeTab && tabRef.currentUrl != HOME_URL) {
+                    onMainFrameError?.invoke(tabRef, failingUrl)
                 }
             }
         )
@@ -304,7 +316,7 @@ class BrowserTabManager(
 
         webView.setDownloadListener(DownloadListener { url, ua, cd, mime, _ ->
             if (!url.isNullOrBlank()) {
-                onDownloadRequested(url, ua.orEmpty(), cd.orEmpty(), mime.orEmpty())
+                onDownloadRequested(tabRef, url, ua.orEmpty(), cd.orEmpty(), mime.orEmpty())
             }
         })
 
@@ -445,6 +457,18 @@ class BrowserTabManager(
         activeIndex = savedIdx.coerceIn(0, _tabs.lastIndex)
         onTabStateUpdated()
         return true
+    }
+
+    fun navigateTabToHome(tab: BrowserTab) {
+        tab.isLoading = false
+        tab.needsRestoreLoad = false
+        tab.currentUrl = HOME_URL
+        tab.title = if (tab.incognito) "تب ناشناس" else "تب جدید"
+        tab.webView.stopLoading()
+        tab.webView.stopAllMediaPlayback()
+        tab.webView.loadUrl("about:blank")
+        persistSessionQuietly()
+        onTabStateUpdated()
     }
 
     fun ensureTabLoaded(tab: BrowserTab) {

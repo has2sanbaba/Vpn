@@ -21,8 +21,8 @@ android {
         // Android 5.0 Lollipop (API 21) -> Android 15/16+ (API 35+)
         minSdk = 21
         targetSdk = 35
-        versionCode = 400
-        versionName = "4.0.0"
+        versionCode = 500
+        versionName = "5.0.0"
 
         multiDexEnabled = true
         vectorDrawables.useSupportLibrary = true

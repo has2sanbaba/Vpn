@@ -49,17 +49,18 @@ class TabsBottomSheet : BottomSheetDialogFragment() {
             mgr = mgr,
             onSelect = { idx ->
                 mgr.selectTab(idx)
-                mgr.activeTab?.let { mgr.ensureTabLoaded(it) }
+                mgr.activeTab?.let { mainActivity?.ensureTabRestoredAndLoaded(it) }
                 dismissAllowingStateLoss()
             },
             onClose = { idx ->
                 val closed = mgr.closeTab(idx)
                 binding.rvTabs.adapter?.notifyDataSetChanged()
                 if (closed != null) {
-                    Snackbar.make(binding.root, "تب بسته شد", Snackbar.LENGTH_SHORT)
+                    val snackAnchor = mainActivity?.rootViewForSnackbar() ?: binding.root
+                    Snackbar.make(snackAnchor, "تب بسته شد", Snackbar.LENGTH_SHORT)
                         .setAction("واگرد") {
                             mainActivity?.openUrlInNewTab(closed.second, incognito = false, selectImmediately = true)
-                            binding.rvTabs.adapter?.notifyDataSetChanged()
+                            _binding?.rvTabs?.adapter?.notifyDataSetChanged()
                         }
                         .show()
                 }
@@ -132,10 +133,12 @@ class TabsBottomSheet : BottomSheetDialogFragment() {
             }
 
             holder.b.tvTabTitle.text = tab.title
-            holder.b.tvTabUrl.text = if (tab.currentUrl == BrowserTabManager.HOME_URL) {
-                if (tab.incognito) "تب ناشناس جدید" else "صفحه تب جدید"
+            if (tab.currentUrl == BrowserTabManager.HOME_URL) {
+                holder.b.tvTabUrl.textDirection = View.TEXT_DIRECTION_LOCALE
+                holder.b.tvTabUrl.text = if (tab.incognito) "تب ناشناس جدید" else "صفحه تب جدید"
             } else {
-                host.ifBlank { tab.currentUrl }
+                holder.b.tvTabUrl.textDirection = View.TEXT_DIRECTION_LTR
+                holder.b.tvTabUrl.text = host.ifBlank { tab.currentUrl }
             }
 
             holder.b.tabItemRoot.setOnClickListener {

@@ -8,9 +8,12 @@ import android.graphics.Color
 import android.graphics.Typeface
 import android.graphics.drawable.ColorDrawable
 import android.net.Uri
+import android.os.Build
 import android.print.PrintAttributes
 import android.print.PrintManager
+import android.provider.Settings
 import android.text.Editable
+import android.text.InputType
 import android.text.TextUtils
 import android.text.TextWatcher
 import android.view.Gravity
@@ -18,6 +21,7 @@ import android.view.View
 import android.view.ViewGroup
 import android.view.WindowManager
 import android.webkit.CookieManager
+import android.webkit.MimeTypeMap
 import android.widget.ArrayAdapter
 import android.widget.CheckBox
 import android.widget.EditText
@@ -25,6 +29,7 @@ import android.widget.ImageButton
 import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.PopupWindow
+import android.widget.ProgressBar
 import android.widget.ScrollView
 import android.widget.SeekBar
 import android.widget.Spinner
@@ -34,9 +39,14 @@ import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatDelegate
 import androidx.core.content.ContextCompat
 import androidx.core.content.FileProvider
+import androidx.lifecycle.lifecycleScope
+import com.google.android.material.bottomsheet.BottomSheetBehavior
 import com.google.android.material.bottomsheet.BottomSheetDialog
 import com.google.android.material.button.MaterialButton
 import com.google.android.material.snackbar.Snackbar
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.flow.collectLatest
+import kotlinx.coroutines.launch
 import org.greatfire.browser.R
 import org.greatfire.browser.data.BookmarkItem
 import org.greatfire.browser.data.BrowserDataStore
@@ -57,7 +67,7 @@ import java.util.Locale
 object ChromeFeaturesDialogs {
 
     // =========================================================================
-    // 1. Authentic Google Chrome Long-Press Context Menu (Links & Images)
+    // 1. Authentic Google Chrome Long-Press Context Menu (Links, Images & Media)
     // =========================================================================
     fun showWebContextMenuSheet(
         activity: MainActivity,
@@ -74,7 +84,6 @@ object ChromeFeaturesDialogs {
             setPadding(0, (12 * dp).toInt(), 0, (16 * dp).toInt())
         }
 
-        // Header showing link text / image alt + full URL (tap to expand or copy)
         val headerBox = LinearLayout(activity).apply {
             orientation = LinearLayout.VERTICAL
             val hPad = (20 * dp).toInt()
@@ -84,9 +93,14 @@ object ChromeFeaturesDialogs {
             payload.linkText.isNotBlank() -> payload.linkText
             payload.imageAlt.isNotBlank() -> payload.imageAlt
             payload.hasLink -> "گزینه‌های لینک"
+            payload.hasMedia -> "گزینه‌های رسانه (ویدیو / صدا)"
             else -> "گزینه‌های تصویر"
         }
-        val urlPreviewStr = payload.linkUrl.ifBlank { payload.imageUrl }
+        val urlPreviewStr = when {
+            payload.linkUrl.isNotBlank() -> payload.linkUrl
+            payload.mediaUrl.isNotBlank() -> payload.mediaUrl
+            else -> payload.imageUrl
+        }
 
         val tvHeaderTitle = TextView(activity).apply {
             text = titleStr
@@ -152,6 +166,7 @@ object ChromeFeaturesDialogs {
         if (payload.hasLink) {
             val link = payload.linkUrl
             val isWebLink = link.startsWith("http://", true) || link.startsWith("https://", true)
+            val isDownloadableLink = isWebLink || link.startsWith("blob:", true) || link.startsWith("data:", true)
 
             if (isWebLink) {
                 addActionRow(R.drawable.ic_add, "باز کردن در تب جدید") {
@@ -190,9 +205,9 @@ object ChromeFeaturesDialogs {
                 )
             }
 
-            if (isWebLink) {
+            if (isDownloadableLink) {
                 addActionRow(R.drawable.ic_download, "دانلود لینک") {
-                    activity.startManagedDownload(link, "", "", "")
+                    activity.startManagedDownload(link, "", "", "", tab)
                 }
             }
         }
@@ -206,7 +221,7 @@ object ChromeFeaturesDialogs {
                 activity.openUrlInNewTab(imgUrl, incognito = tab.incognito, selectImmediately = true)
             }
             addActionRow(R.drawable.ic_download, "دانلود تصویر") {
-                activity.startManagedDownload(imgUrl, "", "", "image/*")
+                activity.startManagedDownload(imgUrl, "", "", "image/*", tab)
             }
             addActionRow(R.drawable.ic_lock, "کپی آدرس تصویر") {
                 copyToClipboard(activity, "Image URL", imgUrl, "آدرس تصویر کپی شد")
@@ -219,6 +234,24 @@ object ChromeFeaturesDialogs {
                     val lensUrl = "https://lens.google.com/uploadbyurl?url=" + URLEncoder.encode(imgUrl, "UTF-8")
                     activity.openUrlInNewTab(lensUrl, incognito = tab.incognito, selectImmediately = true)
                 }
+            }
+        }
+
+        if (payload.hasMedia) {
+            if (payload.hasLink || payload.hasImage) {
+                itemsCol.addView(makeDivider(activity))
+            }
+            val mediaUrl = payload.mediaUrl
+            addActionRow(R.drawable.ic_download, "دانلود مستقیم ویدیو / فایل صوتی") {
+                activity.startManagedDownload(mediaUrl, "", "", "video/mp4", tab)
+            }
+            if (mediaUrl.startsWith("http://", true) || mediaUrl.startsWith("https://", true)) {
+                addActionRow(R.drawable.ic_add, "باز کردن رسانه در تب جدید") {
+                    activity.openUrlInNewTab(mediaUrl, incognito = tab.incognito, selectImmediately = true)
+                }
+            }
+            addActionRow(R.drawable.ic_lock, "کپی آدرس رسانه") {
+                copyToClipboard(activity, "Media URL", mediaUrl, "آدرس رسانه کپی شد")
             }
         }
 
@@ -398,7 +431,14 @@ object ChromeFeaturesDialogs {
         addMenuRow(R.drawable.ic_close, "پاک کردن اطلاعات مرور…") {
             showClearBrowsingDataDialog(activity)
         }
-        addMenuRow(R.drawable.ic_download, "دانلودها") {
+        val activeDlCount = activity.downloadEngine.downloadsFlow.value.count {
+            it.state == DownloadState.DOWNLOADING
+        }
+        addMenuRow(
+            R.drawable.ic_download,
+            "دانلودها",
+            badge = if (activeDlCount > 0) "$activeDlCount فعال" else null
+        ) {
             showDownloadsSheet(activity)
         }
         addMenuRow(R.drawable.ic_star_outline, "نشانک‌ها") {
@@ -443,8 +483,13 @@ object ChromeFeaturesDialogs {
         }
 
         val st = activity.tunnelStatusSnapshot()
-        val pingBadge = if (st.readyNodes > 0 && st.bestRttMs > 0) "${st.bestRttMs}ms" else "فعال"
-        addMenuRow(R.drawable.ic_bolt, "اتصال هوشمند و سریع‌ترین پروکسی", badge = pingBadge) {
+        val pingBadge = when {
+            st.readyNodes > 0 && st.bestRttMs > 0 && st.activeSources > 1 ->
+                "${st.bestRttMs}ms • ${st.activeSources} منبع"
+            st.readyNodes > 0 && st.bestRttMs > 0 -> "${st.bestRttMs}ms"
+            else -> "فعال"
+        }
+        addMenuRow(R.drawable.ic_bolt, "پروکسی چندمنبعی و کانفیگ اختصاصی", badge = pingBadge) {
             activity.showProxySettingsDialog()
         }
         addMenuRow(R.drawable.ic_settings, "تنظیمات") {
@@ -474,6 +519,7 @@ object ChromeFeaturesDialogs {
         val store = activity.dataStore
         val dp = activity.resources.displayMetrics.density
         val dialog = BottomSheetDialog(activity)
+        dialog.window?.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE)
 
         val root = LinearLayout(activity).apply {
             orientation = LinearLayout.VERTICAL
@@ -583,7 +629,7 @@ object ChromeFeaturesDialogs {
         box.addView(etTitle)
         box.addView(etUrl)
 
-        AlertDialog.Builder(activity)
+        val dlg = AlertDialog.Builder(activity)
             .setTitle("ویرایش نشانک")
             .setView(box)
             .setPositiveButton("ذخیره") { _, _ ->
@@ -597,7 +643,9 @@ object ChromeFeaturesDialogs {
                 activity.openUrlInNewTab(item.url, incognito = false, selectImmediately = true)
             }
             .setNegativeButton("انصراف", null)
-            .show()
+            .create()
+        dlg.window?.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE)
+        dlg.show()
     }
 
     // =========================================================================
@@ -607,6 +655,7 @@ object ChromeFeaturesDialogs {
         val store = activity.dataStore
         val dp = activity.resources.displayMetrics.density
         val dialog = BottomSheetDialog(activity)
+        dialog.window?.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE)
         val timeFmt = SimpleDateFormat("MM/dd HH:mm", Locale.US)
 
         val root = LinearLayout(activity).apply {
@@ -833,9 +882,12 @@ object ChromeFeaturesDialogs {
     }
 
     // =========================================================================
-    // 6. Chrome Downloads Manager Sheet
+    // 6. Upgraded Chrome Resumable Tunneled Downloads Manager Sheet (v5.0)
+    //    Live Speed/Progress, Pause, Resume/Retry, Cancel, + Download by URL,
+    //    and Safe APK Installation / FileProvider Sharing across API 21–35!
     // =========================================================================
     fun showDownloadsSheet(activity: MainActivity) {
+        val engine = activity.downloadEngine
         val store = activity.dataStore
         val dp = activity.resources.displayMetrics.density
         val dialog = BottomSheetDialog(activity)
@@ -853,20 +905,29 @@ object ChromeFeaturesDialogs {
         }
         val titleTv = TextView(activity).apply {
             layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
-            text = "📥 دانلودها"
+            text = "📥 مدیریت دانلودها"
             setTextColor(ContextCompat.getColor(activity, R.color.gf_text_primary))
-            textSize = 17f
+            textSize = 16.5f
             setTypeface(typeface, Typeface.BOLD)
         }
-        val clearBtn = MaterialButton(activity, null, com.google.android.material.R.attr.borderlessButtonStyle).apply {
-            text = "پاک کردن لیست"
+        val addUrlBtn = MaterialButton(activity, null, com.google.android.material.R.attr.borderlessButtonStyle).apply {
+            text = "➕ لینک جدید"
             textSize = 12f
+            setTextColor(ContextCompat.getColor(activity, R.color.gf_accent))
             setOnClickListener {
-                store.clearDownloads()
-                dialog.dismiss()
+                showNewDownloadByUrlDialog(activity)
+            }
+        }
+        val clearBtn = MaterialButton(activity, null, com.google.android.material.R.attr.borderlessButtonStyle).apply {
+            text = "پاک‌سازی"
+            textSize = 12f
+            setTextColor(ContextCompat.getColor(activity, R.color.gf_danger))
+            setOnClickListener {
+                engine.clearFinishedDownloads()
             }
         }
         headerRow.addView(titleTv)
+        headerRow.addView(addUrlBtn)
         headerRow.addView(clearBtn)
         root.addView(headerRow)
 
@@ -876,81 +937,349 @@ object ChromeFeaturesDialogs {
         val scroll = ScrollView(activity).apply {
             layoutParams = LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
-                (330 * dp).toInt()
+                (390 * dp).toInt()
             ).apply { topMargin = (10 * dp).toInt() }
             addView(listContainer)
         }
         root.addView(scroll)
 
-        fun renderDownloads() {
+        fun renderDownloads(items: List<DownloadRecord>) {
             listContainer.removeAllViews()
-            val items = store.getDownloads()
             if (items.isEmpty()) {
-                listContainer.addView(makeEmptyStateLabel(activity, "فایلی دانلود نشده است."))
-                return
-            }
-            for (d in items) {
-                val sizeStr = formatBytes(d.bytesRead)
-                val statusStr = when (d.state) {
-                    DownloadState.DOWNLOADING -> "⏳ درحال دانلود ($sizeStr)"
-                    DownloadState.COMPLETED -> "✅ کامل شد ($sizeStr) — برای باز کردن لمس کنید"
-                    DownloadState.FAILED -> "⚠ ناموفق (${d.errorMsg.ifBlank { "لمس برای تلاش مجدد" }})"
-                }
                 listContainer.addView(
-                    makeTwoLineListRow(
-                        activity = activity,
-                        title = d.fileName,
-                        subtitle = statusStr,
-                        onRowClick = {
-                            when (d.state) {
-                                DownloadState.COMPLETED -> openDownloadedFile(activity, d)
-                                DownloadState.FAILED -> {
-                                    dialog.dismiss()
-                                    if (d.url.isNotBlank()) {
-                                        activity.startManagedDownload(d.url, "", "", d.mimeType)
-                                    }
-                                }
-                                DownloadState.DOWNLOADING -> {}
-                            }
-                        },
-                        onRowLongClick = {
-                            if (d.url.isNotBlank()) {
-                                copyToClipboard(activity, "Download URL", d.url, "لینک دانلود کپی شد")
-                            }
-                        },
-                        onDeleteClick = {
-                            store.deleteDownloadRecord(d.id)
-                            renderDownloads()
-                        }
+                    makeEmptyStateLabel(
+                        activity,
+                        "هنوز فایلی دانلود نشده است.\nمی‌توانید روی «➕ لینک جدید» بزنید یا روی هر فایل در وب نگه دارید."
                     )
                 )
+                return
+            }
+
+            for (d in items) {
+                val card = LinearLayout(activity).apply {
+                    orientation = LinearLayout.VERTICAL
+                    setBackgroundResource(R.drawable.bg_card_dark)
+                    layoutParams = LinearLayout.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT,
+                        ViewGroup.LayoutParams.WRAP_CONTENT
+                    ).apply { bottomMargin = (8 * dp).toInt() }
+                    setPadding((12 * dp).toInt(), (10 * dp).toInt(), (12 * dp).toInt(), (8 * dp).toInt())
+                    setOnLongClickListener {
+                        if (d.url.isNotBlank()) {
+                            copyToClipboard(activity, "Download URL", d.url, "لینک دانلود کپی شد")
+                        }
+                        true
+                    }
+                }
+
+                val icon = fileTypeEmoji(d.fileName, d.mimeType)
+                card.addView(TextView(activity).apply {
+                    text = "$icon ${d.fileName}"
+                    setTextColor(ContextCompat.getColor(activity, R.color.gf_text_primary))
+                    textSize = 13.5f
+                    setTypeface(typeface, Typeface.BOLD)
+                    maxLines = 2
+                    ellipsize = TextUtils.TruncateAt.MIDDLE
+                })
+
+                val host = runCatching { Uri.parse(d.url).host.orEmpty() }.getOrDefault("")
+                if (host.isNotBlank()) {
+                    card.addView(TextView(activity).apply {
+                        text = host
+                        setTextColor(ContextCompat.getColor(activity, R.color.gf_text_secondary))
+                        textSize = 11f
+                        textDirection = View.TEXT_DIRECTION_LTR
+                        maxLines = 1
+                        ellipsize = TextUtils.TruncateAt.END
+                    })
+                }
+
+                val pct = if (d.totalBytes > 0L) {
+                    ((d.bytesRead * 100L) / d.totalBytes).toInt().coerceIn(0, 100)
+                } else -1
+
+                if (d.state == DownloadState.DOWNLOADING || d.state == DownloadState.PAUSED) {
+                    val pb = ProgressBar(activity, null, android.R.attr.progressBarStyleHorizontal).apply {
+                        layoutParams = LinearLayout.LayoutParams(
+                            ViewGroup.LayoutParams.MATCH_PARENT,
+                            (6 * dp).toInt()
+                        ).apply {
+                            topMargin = (6 * dp).toInt()
+                            bottomMargin = (4 * dp).toInt()
+                        }
+                        max = 100
+                        isIndeterminate = pct < 0 && d.state == DownloadState.DOWNLOADING
+                        if (pct >= 0) progress = pct
+                    }
+                    card.addView(pb)
+                }
+
+                val sizePart = if (d.totalBytes > 0L) {
+                    "${formatBytes(d.bytesRead)} / ${formatBytes(d.totalBytes)}" +
+                        if (pct >= 0) " ($pct%)" else ""
+                } else {
+                    formatBytes(d.bytesRead)
+                }
+
+                val isApk = d.fileName.endsWith(".apk", ignoreCase = true) ||
+                    d.mimeType.equals("application/vnd.android.package-archive", ignoreCase = true)
+
+                val statusText = when (d.state) {
+                    DownloadState.DOWNLOADING -> {
+                        val spd = if (d.speedBps > 0L) " • ${formatBytes(d.speedBps)}/s" else ""
+                        "⏳ در حال دانلود • $sizePart$spd"
+                    }
+                    DownloadState.PAUSED -> "⏸ متوقف شده • $sizePart"
+                    DownloadState.COMPLETED -> {
+                        if (isApk) "✅ آماده نصب • ${formatBytes(d.bytesRead)}"
+                        else "✅ تکمیل شد • ${formatBytes(d.bytesRead)}"
+                    }
+                    DownloadState.CANCELED -> "✕ لغو شده"
+                    DownloadState.FAILED -> "⚠ ناموفق • ${d.errorMsg.ifBlank { sizePart }}"
+                }
+
+                val statusColor = when (d.state) {
+                    DownloadState.COMPLETED -> R.color.gf_emerald
+                    DownloadState.FAILED, DownloadState.CANCELED -> R.color.gf_danger
+                    DownloadState.DOWNLOADING -> R.color.gf_accent
+                    DownloadState.PAUSED -> R.color.gf_amber
+                }
+
+                card.addView(TextView(activity).apply {
+                    text = statusText
+                    setTextColor(ContextCompat.getColor(activity, statusColor))
+                    textSize = 12f
+                    setPadding(0, (4 * dp).toInt(), 0, (4 * dp).toInt())
+                })
+
+                val actionsRow = LinearLayout(activity).apply {
+                    orientation = LinearLayout.HORIZONTAL
+                    gravity = Gravity.END or Gravity.CENTER_VERTICAL
+                }
+
+                fun addActionChip(label: String, colorRes: Int, onClick: () -> Unit) {
+                    actionsRow.addView(TextView(activity).apply {
+                        text = label
+                        setTextColor(ContextCompat.getColor(activity, colorRes))
+                        textSize = 12.5f
+                        setTypeface(typeface, Typeface.BOLD)
+                        setSelectableRipple(activity, this)
+                        setPadding((10 * dp).toInt(), (6 * dp).toInt(), (10 * dp).toInt(), (6 * dp).toInt())
+                        setOnClickListener { onClick() }
+                    })
+                }
+
+                when (d.state) {
+                    DownloadState.DOWNLOADING -> {
+                        addActionChip("⏸ توقف موقت", R.color.gf_amber) {
+                            engine.pauseDownload(d.id)
+                        }
+                        addActionChip("✕ لغو", R.color.gf_danger) {
+                            engine.cancelDownload(d.id)
+                        }
+                    }
+                    DownloadState.PAUSED, DownloadState.FAILED, DownloadState.CANCELED -> {
+                        if (d.url.startsWith("http", ignoreCase = true)) {
+                            val lbl = if (d.state == DownloadState.PAUSED) "▶ ادامه دانلود" else "🔄 تلاش مجدد"
+                            addActionChip(lbl, R.color.gf_accent) {
+                                engine.resumeOrRetryDownload(d.id)
+                            }
+                        }
+                        addActionChip("🗑 حذف", R.color.gf_danger) {
+                            engine.deleteDownload(d.id, deleteDiskFile = true)
+                        }
+                    }
+                    DownloadState.COMPLETED -> {
+                        addActionChip(if (isApk) "📦 نصب برنامه" else "📂 باز کردن", R.color.gf_accent) {
+                            openDownloadedFile(activity, d)
+                        }
+                        addActionChip("اشتراک‌گذاری", R.color.gf_text_primary) {
+                            shareDownloadedFile(activity, d)
+                        }
+                        addActionChip("حذف از لیست", R.color.gf_danger) {
+                            engine.deleteDownload(d.id, deleteDiskFile = false)
+                        }
+                    }
+                }
+
+                card.addView(actionsRow)
+                listContainer.addView(card)
             }
         }
 
-        renderDownloads()
+        renderDownloads(engine.downloadsFlow.value.ifEmpty { store.getDownloads() })
+
+        val collectJob: Job = activity.lifecycleScope.launch {
+            engine.downloadsFlow.collectLatest { updated ->
+                renderDownloads(updated)
+            }
+        }
+        dialog.setOnDismissListener {
+            collectJob.cancel()
+        }
+
         dialog.setContentView(root)
+        dialog.behavior.state = BottomSheetBehavior.STATE_EXPANDED
         dialog.show()
     }
 
+    private fun showNewDownloadByUrlDialog(activity: MainActivity) {
+        val dp = activity.resources.displayMetrics.density
+        val box = LinearLayout(activity).apply {
+            orientation = LinearLayout.VERTICAL
+            val p = (20 * dp).toInt()
+            setPadding(p, (12 * dp).toInt(), p, (4 * dp).toInt())
+        }
+        val etUrl = EditText(activity).apply {
+            hint = "https://example.com/file.apk"
+            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS
+            textDirection = View.TEXT_DIRECTION_LTR
+            setSingleLine()
+            val cm = activity.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
+            val clip = cm?.primaryClip?.getItemAt(0)?.coerceToText(activity)?.toString()?.trim().orEmpty()
+            if (clip.startsWith("http://", true) || clip.startsWith("https://", true)) {
+                setText(clip)
+                setSelection(clip.length)
+            }
+        }
+        box.addView(etUrl)
+
+        val dlg = AlertDialog.Builder(activity)
+            .setTitle("دانلود مستقیم با لینک (از تونل ضدسانسور)")
+            .setView(box)
+            .setPositiveButton("شروع دانلود") { _, _ ->
+                val rawUrl = etUrl.text?.toString()?.trim().orEmpty()
+                if (!rawUrl.startsWith("http://", true) && !rawUrl.startsWith("https://", true)) {
+                    Toast.makeText(activity, "لطفاً یک لینک معتبر http یا https وارد کنید", Toast.LENGTH_SHORT).show()
+                    return@setPositiveButton
+                }
+                activity.startManagedDownload(rawUrl, "", "", "")
+            }
+            .setNegativeButton("انصراف", null)
+            .create()
+        dlg.window?.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE)
+        dlg.show()
+    }
+
+    private fun resolveDownloadContentUri(activity: MainActivity, d: DownloadRecord): Uri? {
+        // 1. Prefer app staging File via FileProvider (100% reliable across API 21–35 & APK PackageInstaller)
+        if (d.stagingPath.isNotBlank()) {
+            val f = File(d.stagingPath)
+            if (f.exists() && f.length() > 0L) {
+                val fp = runCatching {
+                    FileProvider.getUriForFile(activity, "${activity.packageName}.fileprovider", f)
+                }.getOrNull()
+                if (fp != null) return fp
+            }
+        }
+
+        // 2. Fallback to localUriOrPath
+        if (d.localUriOrPath.isNotBlank()) {
+            if (d.localUriOrPath.startsWith("content://")) {
+                val u = Uri.parse(d.localUriOrPath)
+                val ok = runCatching {
+                    activity.contentResolver.openFileDescriptor(u, "r")?.use { true } ?: false
+                }.getOrDefault(false)
+                if (ok) return u
+            } else {
+                val path = d.localUriOrPath.removePrefix("file://")
+                val f = File(path)
+                if (f.exists()) {
+                    return runCatching {
+                        FileProvider.getUriForFile(activity, "${activity.packageName}.fileprovider", f)
+                    }.getOrNull()
+                }
+            }
+        }
+        return null
+    }
+
+    private fun resolveDownloadMime(d: DownloadRecord): String {
+        val ext = d.fileName.substringAfterLast('.', "").lowercase(Locale.US)
+        if (ext == "apk") return "application/vnd.android.package-archive"
+        if (d.mimeType.isNotBlank() && d.mimeType != "application/octet-stream") {
+            return d.mimeType
+        }
+        if (ext.isNotBlank()) {
+            MimeTypeMap.getSingleton().getMimeTypeFromExtension(ext)?.let { return it }
+        }
+        return d.mimeType.ifBlank { "*/*" }
+    }
+
     private fun openDownloadedFile(activity: MainActivity, d: DownloadRecord) {
-        if (d.localUriOrPath.isBlank()) {
-            Toast.makeText(activity, "فایل در پوشه Downloads ذخیره شده است", Toast.LENGTH_SHORT).show()
+        val uri = resolveDownloadContentUri(activity, d)
+        if (uri == null) {
+            Toast.makeText(activity, "فایل روی حافظه یافت نشد (ممکن است جابه‌جا یا حذف شده باشد)", Toast.LENGTH_SHORT).show()
             return
         }
+
+        val mime = resolveDownloadMime(d)
+        if (mime == "application/vnd.android.package-archive" && Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            val canInstall = runCatching { activity.packageManager.canRequestPackageInstalls() }.getOrDefault(true)
+            if (!canInstall) {
+                Toast.makeText(
+                    activity,
+                    "لطفاً مجوز نصب برنامه را فعال کنید و دوباره روی «نصب برنامه» بزنید",
+                    Toast.LENGTH_LONG
+                ).show()
+                runCatching {
+                    activity.startActivity(
+                        Intent(
+                            Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES,
+                            Uri.parse("package:${activity.packageName}")
+                        )
+                    )
+                }
+                return
+            }
+        }
+
+        val viewIntent = Intent(Intent.ACTION_VIEW).apply {
+            setDataAndType(uri, mime)
+            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_ACTIVITY_NEW_TASK)
+        }
         runCatching {
-            val uri = if (d.localUriOrPath.startsWith("content://")) {
-                Uri.parse(d.localUriOrPath)
-            } else {
-                val f = File(d.localUriOrPath)
-                FileProvider.getUriForFile(activity, "${activity.packageName}.fileprovider", f)
-            }
-            val viewIntent = Intent(Intent.ACTION_VIEW).apply {
-                setDataAndType(uri, d.mimeType.ifBlank { "*/*" })
-                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-            }
-            activity.startActivity(Intent.createChooser(viewIntent, d.fileName))
+            activity.startActivity(viewIntent)
         }.onFailure {
-            Toast.makeText(activity, "فایل در پوشه Downloads ذخیره است: ${d.fileName}", Toast.LENGTH_LONG).show()
+            val fallback = Intent(Intent.ACTION_VIEW).apply {
+                setDataAndType(uri, "*/*")
+                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_ACTIVITY_NEW_TASK)
+            }
+            runCatching {
+                activity.startActivity(Intent.createChooser(fallback, d.fileName))
+            }.onFailure {
+                Toast.makeText(activity, "برنامه‌ای برای باز کردن این فایل روی گوشی نصب نیست", Toast.LENGTH_LONG).show()
+            }
+        }
+    }
+
+    private fun shareDownloadedFile(activity: MainActivity, d: DownloadRecord) {
+        val uri = resolveDownloadContentUri(activity, d)
+        if (uri == null) {
+            Toast.makeText(activity, "فایل برای اشتراک‌گذاری یافت نشد", Toast.LENGTH_SHORT).show()
+            return
+        }
+        val mime = resolveDownloadMime(d)
+        val share = Intent(Intent.ACTION_SEND).apply {
+            type = mime
+            putExtra(Intent.EXTRA_STREAM, uri)
+            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        }
+        runCatching {
+            activity.startActivity(Intent.createChooser(share, d.fileName))
+        }
+    }
+
+    private fun fileTypeEmoji(fileName: String, mime: String): String {
+        val lower = fileName.lowercase(Locale.US)
+        return when {
+            lower.endsWith(".apk") || mime.contains("android.package-archive") -> "📦"
+            lower.endsWith(".mp4") || lower.endsWith(".mkv") || lower.endsWith(".webm") || mime.startsWith("video/") -> "🎬"
+            lower.endsWith(".mp3") || lower.endsWith(".m4a") || lower.endsWith(".wav") || mime.startsWith("audio/") -> "🎵"
+            lower.endsWith(".jpg") || lower.endsWith(".jpeg") || lower.endsWith(".png") || lower.endsWith(".webp") || mime.startsWith("image/") -> "🖼️"
+            lower.endsWith(".pdf") || mime.contains("pdf") -> "📕"
+            lower.endsWith(".zip") || lower.endsWith(".rar") || lower.endsWith(".7z") -> "🗜️"
+            else -> "📄"
         }
     }
 
@@ -971,7 +1300,7 @@ object ChromeFeaturesDialogs {
         }
 
         val secTitle = when {
-            isHome -> "صفحه شروع Dr Browser"
+            isHome -> "صفحه شروع Dr Browser v5.0"
             isHttps -> "🔒 اتصال به این سایت امن است (HTTPS)"
             else -> "ℹ اتصال این صفحه رمزگذاری نشده است (HTTP)"
         }
@@ -993,8 +1322,10 @@ object ChromeFeaturesDialogs {
         }
 
         val st = activity.tunnelStatusSnapshot()
+        val srcBadge = if (st.bestSource.isNotBlank()) " [${st.bestSource}]" else ""
+        val multiBadge = if (st.activeSources > 0) " • از ${st.activeSources} منبع مستقل" else ""
         val proxyDesc = if (st.readyNodes > 0) {
-            "عبور هوشمند ضد فیلتر: فعال • سرور ${st.bestNode.ifBlank { "خودکار" }} (${st.bestRttMs}ms)"
+            "عبور هوشمند ضد فیلتر: فعال • سرور ${st.bestNode.ifBlank { "خودکار" }}$srcBadge (${st.bestRttMs}ms)$multiBadge"
         } else {
             "عبور هوشمند ضد فیلتر: فعال (DoH + ضد DPI)"
         }
@@ -1051,7 +1382,7 @@ object ChromeFeaturesDialogs {
         scroll.addView(box)
 
         box.addView(TextView(activity).apply {
-            text = "⚙️ تنظیمات مرورگر (Chrome Settings)"
+            text = "⚙️ تنظیمات مرورگر (Dr Browser v5.0)"
             setTextColor(ContextCompat.getColor(activity, R.color.gf_text_primary))
             textSize = 17.5f
             setTypeface(typeface, Typeface.BOLD)
@@ -1226,7 +1557,9 @@ object ChromeFeaturesDialogs {
                 activity.refreshChromeShortcutsGrid()
             }
         }
-        builder.show()
+        val dlg = builder.create()
+        dlg.window?.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE)
+        dlg.show()
     }
 
     fun printCurrentWebPage(activity: MainActivity, tab: BrowserTab) {
@@ -1362,10 +1695,11 @@ object ChromeFeaturesDialogs {
     }
 
     fun formatBytes(bytes: Long): String {
-        if (bytes <= 0L) return "0 KB"
+        if (bytes <= 0L) return "0 B"
         val kb = bytes / 1024.0
         if (kb < 1024.0) return String.format(Locale.US, "%.1f KB", kb)
         val mb = kb / 1024.0
-        return String.format(Locale.US, "%.2f MB", mb)
+        if (mb < 1024.0) return String.format(Locale.US, "%.2f MB", mb)
+        return String.format(Locale.US, "%.2f GB", mb / 1024.0)
     }
 }

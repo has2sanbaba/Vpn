@@ -455,7 +455,9 @@ type StatusResponse struct {
 	DoHQueries        uint64        `json:"doh_queries"`
 	DoHCacheHits      uint64        `json:"doh_cache_hits"`
 	ReadyNodes        int           `json:"ready_nodes"`
+	ActiveSources     int           `json:"active_sources"`
 	BestNode          string        `json:"best_node,omitempty"`
+	BestSource        string        `json:"best_source,omitempty"`
 	BestProto         string        `json:"best_proto,omitempty"`
 	BestRTTMs         int64         `json:"best_rtt_ms,omitempty"`
 	BestSpeedKbps     int64         `json:"best_speed_kbps,omitempty"`
@@ -489,7 +491,7 @@ func NewControlMux(gw *GatewayServer, router *UpstreamRouter, doh *DoHResolver, 
 		if !authorized(w, r) {
 			return
 		}
-		bestName, bestProto, bestRTT, bestSpeed, readyCnt := gw.pool.BestNodeSummary()
+		bestName, bestSource, bestProto, bestRTT, bestSpeed, readyCnt, activeSrcs := gw.pool.BestNodeSummary()
 		cfg := router.GetConfig()
 		cfg.CustomURI = gw.pool.GetCustomURI()
 		resp := StatusResponse{
@@ -504,7 +506,9 @@ func NewControlMux(gw *GatewayServer, router *UpstreamRouter, doh *DoHResolver, 
 			DoHQueries:        doh.Queries.Load(),
 			DoHCacheHits:      doh.CacheHits.Load(),
 			ReadyNodes:        readyCnt,
+			ActiveSources:     activeSrcs,
 			BestNode:          bestName,
+			BestSource:        bestSource,
 			BestProto:         bestProto,
 			BestRTTMs:         bestRTT,
 			BestSpeedKbps:     bestSpeed,
@@ -514,6 +518,70 @@ func NewControlMux(gw *GatewayServer, router *UpstreamRouter, doh *DoHResolver, 
 		}
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(resp)
+	})
+
+	mux.HandleFunc("/custom/list", func(w http.ResponseWriter, r *http.Request) {
+		if !authorized(w, r) {
+			return
+		}
+		nodes, subs := gw.pool.ListCustomConfigs()
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"ok":           true,
+			"custom_nodes": nodes,
+			"custom_subs":  subs,
+		})
+	})
+
+	mux.HandleFunc("/custom/add", func(w http.ResponseWriter, r *http.Request) {
+		if !authorized(w, r) {
+			return
+		}
+		if r.Method != http.MethodPost {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		var reqBody struct {
+			Input string `json:"input"`
+		}
+		if err := json.NewDecoder(io.LimitReader(r.Body, 512*1024)).Decode(&reqBody); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		ctx, cancel := context.WithTimeout(r.Context(), 11*time.Second)
+		defer cancel()
+		res := gw.pool.AddCustomInput(ctx, reqBody.Input)
+		if res.OK {
+			gw.racer.ResetMethodCache()
+		}
+		w.Header().Set("Content-Type", "application/json")
+		if !res.OK {
+			w.WriteHeader(http.StatusBadRequest)
+		}
+		_ = json.NewEncoder(w).Encode(res)
+	})
+
+	mux.HandleFunc("/custom/delete", func(w http.ResponseWriter, r *http.Request) {
+		if !authorized(w, r) {
+			return
+		}
+		if r.Method != http.MethodPost {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		var reqBody struct {
+			ID       string `json:"id"`
+			SubURL   string `json:"sub_url"`
+			ClearAll bool   `json:"clear_all"`
+		}
+		if err := json.NewDecoder(io.LimitReader(r.Body, 16384)).Decode(&reqBody); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		gw.pool.DeleteCustomConfig(reqBody.ID, reqBody.SubURL, reqBody.ClearAll)
+		gw.racer.ResetMethodCache()
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{"ok": true})
 	})
 
 	mux.HandleFunc("/nodes", func(w http.ResponseWriter, r *http.Request) {
@@ -643,7 +711,7 @@ func NewControlMux(gw *GatewayServer, router *UpstreamRouter, doh *DoHResolver, 
 
 		resp, err := client.Do(req)
 		elapsed := time.Since(start).Milliseconds()
-		bestName, _, _, bestSpeed, _ := gw.pool.BestNodeSummary()
+		bestName, _, _, _, bestSpeed, _, _ := gw.pool.BestNodeSummary()
 
 		w.Header().Set("Content-Type", "application/json")
 		if err != nil {
