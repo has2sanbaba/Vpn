@@ -1,4 +1,4 @@
-name: Build Dr Browser v6.0 Chrome Edition + IDM Video Grabber (Play Protect Clean)
+name: Build Dr Browser v7.0 (Lightning Privacy Base + 50-Source XHTTP Proxy + IDM)
 
 on:
   push:
@@ -21,9 +21,13 @@ on:
 permissions:
   contents: write
 
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   build-android:
-    name: Build & Verify Dr Browser v6.0 (API 21–35+, All 4 ABIs, Play Protect Clean)
+    name: Build & Verify Dr Browser v7.0 (API 21–35+, All 4 ABIs, Play Protect Clean)
     runs-on: ubuntu-latest
     timeout-minutes: 30
 
@@ -58,7 +62,7 @@ jobs:
         run: |
           set +e
           GOTOOLCHAIN=auto go mod tidy > go_test.log 2>&1
-          GOTOOLCHAIN=auto go test -v -race ./... >> go_test.log 2>&1
+          GOTOOLCHAIN=auto go test -v -race -timeout 90s ./... >> go_test.log 2>&1
           RC=$?
           cat go_test.log
           if [[ "$RC" -ne 0 ]]; then
@@ -130,11 +134,11 @@ jobs:
       - name: Run Unit Tests & Assemble R8-Shrunk Release + Debug APKs
         run: |
           set +e
-          ./gradlew testDebugUnitTest assembleRelease assembleDebug --no-daemon > gradle_build.log 2>&1
+          ./gradlew testDebugUnitTest assembleRelease assembleDebug --no-daemon --stacktrace > gradle_build.log 2>&1
           RC=$?
           cat gradle_build.log
           if [[ "$RC" -ne 0 ]]; then
-            ERR_SUMMARY="$(grep -E '(^e: |FAILURE:|^\* What went wrong:|^  > |Exception:|Error:|FAILED)' gradle_build.log | head -n 45 | sed 's/%/%25/g; s/\r/%0D/g' | paste -sd '|' - | sed 's/|/%0A/g')"
+            ERR_SUMMARY="$(grep -iE '(^e: |error:|\[Dagger|Caused by:|FAILURE:|^\* What went wrong:|^  > |Exception:|FAILED)' gradle_build.log | head -n 55 | sed 's/%/%25/g; s/\r/%0D/g' | paste -sd '|' - | sed 's/|/%0A/g')"
             TAIL_SUMMARY="$(tail -n 55 gradle_build.log | sed 's/%/%25/g; s/\r/%0D/g' | paste -sd '|' - | sed 's/|/%0A/g')"
             echo "::error title=GradleErrorSummary::${ERR_SUMMARY}"
             echo "::error title=GradleLogTail::${TAIL_SUMMARY}"
@@ -152,13 +156,13 @@ jobs:
           REL_DIR="app/build/outputs/apk/release"
           mkdir -p dist
 
-          cp "$REL_DIR/app-universal-release.apk"   "dist/Dr-Browser-v6.0.0-universal-release.apk"
-          cp "$REL_DIR/app-arm64-v8a-release.apk"   "dist/Dr-Browser-v6.0.0-arm64-v8a-release.apk"
-          cp "$REL_DIR/app-armeabi-v7a-release.apk" "dist/Dr-Browser-v6.0.0-armeabi-v7a-release.apk"
-          cp "$REL_DIR/app-x86_64-release.apk"      "dist/Dr-Browser-v6.0.0-x86_64-release.apk"
-          cp "$REL_DIR/app-x86-release.apk"         "dist/Dr-Browser-v6.0.0-x86-release.apk"
+          cp "$REL_DIR/app-universal-release.apk"   "dist/Dr-Browser-v7.0.0-universal-release.apk"
+          cp "$REL_DIR/app-arm64-v8a-release.apk"   "dist/Dr-Browser-v7.0.0-arm64-v8a-release.apk"
+          cp "$REL_DIR/app-armeabi-v7a-release.apk" "dist/Dr-Browser-v7.0.0-armeabi-v7a-release.apk"
+          cp "$REL_DIR/app-x86_64-release.apk"      "dist/Dr-Browser-v7.0.0-x86_64-release.apk"
+          cp "$REL_DIR/app-x86-release.apk"         "dist/Dr-Browser-v7.0.0-x86-release.apk"
 
-          UNIV="dist/Dr-Browser-v6.0.0-universal-release.apk"
+          UNIV="dist/Dr-Browser-v7.0.0-universal-release.apk"
           unzip -l "$UNIV" > zip_list.txt
 
           for abi in armeabi-v7a arm64-v8a x86 x86_64; do
@@ -195,11 +199,12 @@ jobs:
           echo "::notice title=BuiltAPKs::${NOTICE_BODY}"
 
           {
-            echo "## ⚡ Dr Browser v6.0 — Play Protect Clean JNI Architecture + 2026 Google Chrome UI + IDM Video/HLS Downloader"
+            echo "## ⚡ Dr Browser v7.0 — Audited Lightning-Browser (MPL-2.0) + 50-Source Xray XHTTP/Reality Engine + IDM Downloader"
             echo ""
             echo "- **100% Google Play Protect Compliant:** True \`-buildmode=c-shared\` JNI native engine (\`System.loadLibrary(\"gfproxy\")\`, zero \`ProcessBuilder\`/\`setExecutable\`), zero \`REQUEST_INSTALL_PACKAGES\`, strict \`SslErrorHandler.cancel()\`, zero private-API reflection, clean \`io.github.has2sanbaba.drbrowser\` identity & cached V1+V2+V3 keystore"
-            echo "- **Authentic 2026 Google Chrome Android UI & Full Features:** Material 3 Expressive Chrome Colors, movable Top/Bottom Address Bar, Chrome Tune (\`⊶\`) Site Controls, Google Lens + Voice NTP, 2-Column Live-Thumbnail Grid Tab Switcher with Pin & Duplicate Tab, Listen to this Page (TTS), Reader Mode, Print to PDF, Translate, Find in Page, Bookmarks, History & Incognito"
-            echo "- **Integrated IDM Video & Stream Sniffer + Multi-Thread/HLS Downloader:** Automatic 3-layer detection of \`.mp4\`/\`.webm\`/\`.mkv\`/\`.mp3\` & \`.m3u8\` HLS streams, floating \`🎬 دانلود ویدیو\` pill, master playlist resolution picker (\`1080p\`/\`720p\`/\`480p\`/\`360p\`), 4–6 connection HTTP \`Range\` accelerator, and hardware-free \`MediaMuxer\` TS-to-MP4 remuxing"
+            echo "- **Unmodified Lightning-Browser (MPL-2.0) Privacy Base:** Pure ultra-lightweight Android Views, BloomFilter AdBlock, Reading Mode, Light/Dark/Black themes, zero trackers, low CPU/GPU/RAM footprint"
+            echo "- **50 Live Sources + Full Xray XHTTP/SplitHTTP & Reality + 3-Min Auto-Retest:** Supports \`vless://...type=xhttp\` (\`mode=auto\`/\`packet-up\`/\`stream-one\`), \`REALITY\` + \`xtls-rprx-vision\`, \`gRPC\`, \`WS\`, \`HTTPUpgrade\`, \`VMess\`, \`Trojan\`, \`Shadowsocks\`, Base64 & Clash YAML, plus foreground-aware periodic speed re-testing"
+            echo "- **Scroll-Fixed BottomSheets & Deep SPA Video Rescan:** \`NestedScrollView\` + scroll-locked \`BottomSheetBehavior\` and deterministic \`performance.getEntriesByType('resource')\` + \`fetch\`/\`XHR\` + ShadowDOM/iframe video discovery"
             echo ""
             echo "### 📦 Ready-to-Install Lightweight Release APKs"
             echo "| File | Size | SHA-256 |"
@@ -215,7 +220,7 @@ jobs:
       - name: Upload Signed Release APKs Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: Dr-Browser-v6-APKs
+          name: Dr-Browser-v7-APKs
           path: dist/*
           if-no-files-found: error
           retention-days: 90
@@ -223,7 +228,7 @@ jobs:
       - name: Upload Debug Universal APK Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: Dr-Browser-v6-Debug-APK
+          name: Dr-Browser-v7-Debug-APK
           path: app/build/outputs/apk/debug/app-universal-debug.apk
           if-no-files-found: warn
           retention-days: 30
@@ -232,13 +237,13 @@ jobs:
         if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v') || github.event.inputs.publish_release == 'true'
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || format('v6.0.0-build.{0}', github.run_number) }}
-          name: "Dr Browser v6.0 Chrome + IDM Edition (${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || format('Build #{0}', github.run_number) }})"
+          tag_name: ${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || format('v7.0.0-build.{0}', github.run_number) }}
+          name: "Dr Browser v7.0 Privacy + 50-Source XHTTP + IDM (${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || format('Build #{0}', github.run_number) }})"
           generate_release_notes: true
           files: |
-            dist/Dr-Browser-v6.0.0-universal-release.apk
-            dist/Dr-Browser-v6.0.0-arm64-v8a-release.apk
-            dist/Dr-Browser-v6.0.0-armeabi-v7a-release.apk
-            dist/Dr-Browser-v6.0.0-x86_64-release.apk
-            dist/Dr-Browser-v6.0.0-x86-release.apk
+            dist/Dr-Browser-v7.0.0-universal-release.apk
+            dist/Dr-Browser-v7.0.0-arm64-v8a-release.apk
+            dist/Dr-Browser-v7.0.0-armeabi-v7a-release.apk
+            dist/Dr-Browser-v7.0.0-x86_64-release.apk
+            dist/Dr-Browser-v7.0.0-x86-release.apk
             dist/SHA256SUMS.txt

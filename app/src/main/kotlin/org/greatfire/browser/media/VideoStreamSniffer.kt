@@ -303,8 +303,10 @@ object VideoStreamSniffer {
 
         val isHls = ext in HLS_EXTS ||
             rawPath.lowercase(Locale.US).contains(".m3u8") ||
+            rawPath.lowercase(Locale.US).contains("/hls/") && rawPath.lowercase(Locale.US).contains("playlist") ||
             cleanMime.contains("mpegurl") ||
-            queryMime.contains("mpegurl")
+            queryMime.contains("mpegurl") ||
+            queryMap["format"]?.equals("m3u8", ignoreCase = true) == true
 
         val isAudio = !isHls && (
             ext in AUDIO_EXTS ||
@@ -315,7 +317,8 @@ object VideoStreamSniffer {
         val isVideo = !isHls && !isAudio && (
             ext in VIDEO_EXTS ||
                 cleanMime.startsWith("video/") ||
-                queryMime.startsWith("video/")
+                queryMime.startsWith("video/") ||
+                queryMap["format"]?.lowercase(Locale.US) in VIDEO_EXTS
             )
 
         if (!isHls && !isVideo && !isAudio) {
@@ -438,77 +441,155 @@ object VideoStreamSniffer {
     }
 
     /**
-     * Audited, lightweight IDM DOM + Fetch/XHR Media Sniffer injected into WebViews.
-     * Detects `<video>`, `<audio>`, `<source>`, OpenGraph video tags, direct download links,
-     * and SPA JSON stream manifests without modifying page layout or breaking site players.
+     * Audited, lightweight IDM DOM + Performance Resource + Fetch/XHR + ShadowDOM/Iframe Media Sniffer.
+     * Calling `window.__drIdmRescan(true)` clears stale suppression, inspects newly loaded SPA videos,
+     * `performance.getEntriesByType('resource')`, hooked `fetch`/`XHR.open` request URLs, open shadowRoots,
+     * and same-origin iframes, and BOTH notifies `DrIdmBridge` AND returns a JSON array synchronously.
      */
     const val IDM_PAGE_SNIFFER_JS = """
-        (function() {
+        (function(forceClear) {
             try {
+                if (forceClear) {
+                    window.__drIdmSeen = Object.create(null);
+                }
                 var seen = window.__drIdmSeen || (window.__drIdmSeen = Object.create(null));
-                function report(kind, rawUrl, w, h, dur) {
+                var netRing = window.__drIdmNetUrls || (window.__drIdmNetUrls = []);
+                var batchOut = [];
+
+                function pushNetUrl(u) {
+                    try {
+                        if (!u || typeof u !== 'string') return;
+                        if (u.indexOf('blob:') === 0 || u.indexOf('data:') === 0) return;
+                        var abs = new URL(u, document.baseURI).href;
+                        if (netRing.length >= 160) netRing.shift();
+                        netRing.push(abs);
+                    } catch (e) {}
+                }
+
+                function looksLikeMediaUrl(u) {
+                    if (!u || typeof u !== 'string') return false;
+                    var low = u.toLowerCase();
+                    if (/\.(ts|m4s|cmfv|cmfa|vtt|srt|jpg|jpeg|png|webp|gif|svg|css|js|woff|woff2)(\?|#|$)/.test(low)) return false;
+                    if (/\.(mp4|m4v|webm|mkv|mov|3gp|m3u8|mp3|m4a|aac|ogg|opus|wav|flac)(\?|#|$)/.test(low)) return true;
+                    if (low.indexOf('.m3u8') >= 0 || low.indexOf('mime=video') >= 0 || low.indexOf('mime=audio') >= 0 || low.indexOf('mime%3dvideo') >= 0 || low.indexOf('format=m3u8') >= 0 || low.indexOf('videoplayback') >= 0) return true;
+                    return false;
+                }
+
+                function report(kind, rawUrl, w, h, dur, mimeHint) {
                     try {
                         if (!rawUrl || typeof rawUrl !== 'string') return;
                         if (rawUrl.indexOf('blob:') === 0 || rawUrl.indexOf('data:') === 0 || rawUrl.indexOf('javascript:') === 0) return;
                         var abs = new URL(rawUrl, document.baseURI).href;
                         var key = abs.split('#')[0];
                         var metaKey = key + '|' + (h || 0) + '|' + Math.round(dur || 0);
+                        var item = {
+                            url: abs,
+                            kind: kind || 'video',
+                            mime: mimeHint || '',
+                            pageUrl: location.href,
+                            title: document.title || location.hostname,
+                            width: w || 0,
+                            height: h || 0,
+                            duration: (isFinite(dur) && dur > 0) ? Math.round(dur) : 0
+                        };
+                        batchOut.push(item);
                         if (seen[metaKey]) return;
                         seen[metaKey] = 1;
                         if (window.DrIdmBridge && window.DrIdmBridge.onMediaDetected) {
-                            window.DrIdmBridge.onMediaDetected(JSON.stringify({
-                                url: abs,
-                                kind: kind || 'video',
-                                pageUrl: location.href,
-                                title: document.title || location.hostname,
-                                width: w || 0,
-                                height: h || 0,
-                                duration: (isFinite(dur) && dur > 0) ? Math.round(dur) : 0
-                            }));
+                            window.DrIdmBridge.onMediaDetected(JSON.stringify(item));
                         }
                     } catch (e) {}
                 }
 
-                function inspectMediaEl(el) {
+                function inspectMediaEl(el, docRef) {
                     if (!el) return;
                     var isAudio = el.tagName === 'AUDIO';
                     var k = isAudio ? 'audio' : 'video';
                     var w = el.videoWidth || 0;
                     var h = el.videoHeight || 0;
                     var d = (isFinite(el.duration) && el.duration > 0) ? el.duration : 0;
-                    if (el.currentSrc) report(k, el.currentSrc, w, h, d);
-                    if (el.src) report(k, el.src, w, h, d);
+                    var defaultMime = isAudio ? 'audio/mp4' : 'video/mp4';
+                    if (el.currentSrc && el.currentSrc.indexOf('blob:') !== 0) report(k, el.currentSrc, w, h, d, defaultMime);
+                    if (el.src && el.src.indexOf('blob:') !== 0) report(k, el.src, w, h, d, defaultMime);
+                    var attrs = ['data-src', 'data-video-src', 'data-mp4', 'data-hls', 'data-stream', 'data-url'];
+                    for (var a = 0; a < attrs.length; a++) {
+                        var av = el.getAttribute ? el.getAttribute(attrs[a]) : null;
+                        if (av && av.indexOf('blob:') !== 0) report(k, av, w, h, d, defaultMime);
+                    }
                     var sources = el.querySelectorAll ? el.querySelectorAll('source') : [];
                     for (var i = 0; i < sources.length; i++) {
-                        if (sources[i].src) report(k, sources[i].src, w, h, d);
+                        var sUrl = sources[i].src || (sources[i].getAttribute && sources[i].getAttribute('src'));
+                        var sType = (sources[i].type || (sources[i].getAttribute && sources[i].getAttribute('type'))) || defaultMime;
+                        if (sUrl && sUrl.indexOf('blob:') !== 0) report(k, sUrl, w, h, d, sType);
                     }
                     if (!el.__drIdmHooked) {
                         el.__drIdmHooked = true;
-                        ['play', 'playing', 'loadedmetadata', 'durationchange'].forEach(function(ev) {
-                            el.addEventListener(ev, function() { inspectMediaEl(el); }, true);
+                        ['play', 'playing', 'loadedmetadata', 'loadeddata', 'durationchange'].forEach(function(ev) {
+                            el.addEventListener(ev, function() { inspectMediaEl(el, docRef); }, true);
                         });
                     }
                 }
 
-                function scanRoot(root) {
-                    root = root || document;
-                    if (!root.querySelectorAll) return;
+                function scanRoot(root, depth) {
+                    if (!root || (depth || 0) > 4 || !root.querySelectorAll) return;
                     var mediaList = root.querySelectorAll('video, audio');
-                    for (var i = 0; i < mediaList.length; i++) inspectMediaEl(mediaList[i]);
+                    for (var i = 0; i < mediaList.length; i++) inspectMediaEl(mediaList[i], root);
 
-                    var metas = document.querySelectorAll('meta[property="og:video"], meta[property="og:video:url"], meta[property="og:video:secure_url"], meta[name="twitter:player:stream"]');
-                    for (var m = 0; m < metas.length; m++) {
-                        var c = metas[m].getAttribute('content');
-                        if (c && c.indexOf('http') === 0) report('video', c, 0, 0, 0);
+                    var standaloneSources = root.querySelectorAll('source[src]');
+                    for (var si = 0; si < standaloneSources.length; si++) {
+                        var su = standaloneSources[si].src || standaloneSources[si].getAttribute('src');
+                        var st = standaloneSources[si].type || standaloneSources[si].getAttribute('type') || 'video/mp4';
+                        if (su) report('video', su, 0, 0, 0, st);
                     }
 
-                    var links = root.querySelectorAll('a[href]');
-                    for (var k = 0; k < links.length && k < 250; k++) {
-                        var href = links[k].getAttribute('href') || '';
-                        var clean = href.split('?')[0].split('#')[0].toLowerCase();
-                        if (/\.(mp4|m4v|webm|mkv|mov|3gp|m3u8|mp3|m4a|aac|ogg|opus|wav|flac)$/.test(clean)) {
-                            var lk = /\.(mp3|m4a|aac|ogg|opus|wav|flac)$/.test(clean) ? 'audio' : 'video';
-                            report(lk, href, 0, 0, 0);
+                    var links = root.querySelectorAll('a[href], [data-video-url], [data-mp4], [data-hls]');
+                    for (var k = 0; k < links.length && k < 300; k++) {
+                        var cand = links[k].getAttribute('href') || links[k].getAttribute('data-video-url') || links[k].getAttribute('data-mp4') || links[k].getAttribute('data-hls') || '';
+                        if (looksLikeMediaUrl(cand)) {
+                            var lk = /\.(mp3|m4a|aac|ogg|opus|wav|flac)(\?|#|$)/i.test(cand) ? 'audio' : 'video';
+                            report(lk, cand, 0, 0, 0, '');
+                        }
+                    }
+
+                    // Pierce open Shadow DOM trees
+                    var allEls = root.querySelectorAll('*');
+                    for (var e = 0; e < allEls.length && e < 800; e++) {
+                        if (allEls[e].shadowRoot) {
+                            scanRoot(allEls[e].shadowRoot, (depth || 0) + 1);
+                        }
+                    }
+
+                    // Pierce accessible same-origin iframes (video embeds!)
+                    var iframes = root.querySelectorAll('iframe');
+                    for (var f = 0; f < iframes.length && f < 15; f++) {
+                        try {
+                            var idoc = iframes[f].contentDocument || (iframes[f].contentWindow && iframes[f].contentWindow.document);
+                            if (idoc) scanRoot(idoc, (depth || 0) + 1);
+                        } catch (ie) {}
+                    }
+                }
+
+                function scanPerformanceAndNetRing() {
+                    try {
+                        if (window.performance && window.performance.getEntriesByType) {
+                            var entries = window.performance.getEntriesByType('resource') || [];
+                            for (var i = 0; i < entries.length; i++) {
+                                var en = entries[i];
+                                var u = en && en.name;
+                                if (!u) continue;
+                                if (looksLikeMediaUrl(u) || en.initiatorType === 'video' || en.initiatorType === 'audio') {
+                                    var isAud = en.initiatorType === 'audio' || /\.(mp3|m4a|aac|ogg|opus|wav|flac)(\?|#|$)/i.test(u);
+                                    var mh = (en.initiatorType === 'video') ? 'video/mp4' : (en.initiatorType === 'audio' ? 'audio/mp4' : '');
+                                    report(isAud ? 'audio' : 'video', u, 0, 0, 0, mh);
+                                }
+                            }
+                        }
+                    } catch (pe) {}
+                    for (var r = 0; r < netRing.length; r++) {
+                        var nu = netRing[r];
+                        if (looksLikeMediaUrl(nu)) {
+                            var na = /\.(mp3|m4a|aac|ogg|opus|wav|flac)(\?|#|$)/i.test(nu);
+                            report(na ? 'audio' : 'video', nu, 0, 0, 0, '');
                         }
                     }
                 }
@@ -516,36 +597,60 @@ object VideoStreamSniffer {
                 function scanJsonText(txt) {
                     try {
                         if (!txt || typeof txt !== 'string' || txt.length > 4000000) return;
-                        if (txt.indexOf('.mp4') < 0 && txt.indexOf('.m3u8') < 0 && txt.indexOf('.webm') < 0 && txt.indexOf('.mp3') < 0 && txt.indexOf('.m4a') < 0) return;
+                        if (txt.indexOf('.mp4') < 0 && txt.indexOf('.m3u8') < 0 && txt.indexOf('.webm') < 0 && txt.indexOf('.mp3') < 0 && txt.indexOf('.m4a') < 0 && txt.indexOf('contentUrl') < 0) return;
                         var unescaped = txt.replace(/\\\//g, '/').replace(/\\u0026/g, '&').replace(/\\u003d/g, '=').replace(/\\u0025/g, '%').replace(/&amp;/g, '&');
                         var re = /https?:\/\/[^"'\s<>\\]+?\.(mp4|m3u8|webm|mkv|mp3|m4a)(\?[^"'\s<>\\]*)?/gi;
                         var match, count = 0;
-                        while ((match = re.exec(unescaped)) && count < 40) {
+                        while ((match = re.exec(unescaped)) && count < 60) {
                             count++;
                             var u = match[0];
                             if (/\.(jpg|jpeg|png|webp|gif|ts)(\?|$)/i.test(u)) continue;
-                            report(/\.(mp3|m4a)(\?|$)/i.test(u) ? 'audio' : 'video', u, 0, 0, 0);
+                            report(/\.(mp3|m4a)(\?|$)/i.test(u) ? 'audio' : 'video', u, 0, 0, 0, '');
                         }
                     } catch (e) {}
                 }
 
-                window.__drIdmRescan = function() {
-                    scanRoot(document);
-                    var scripts = document.querySelectorAll('script[type="application/json"], script[type="application/ld+json"]');
+                window.__drIdmRescan = function(clearSeenFlag) {
+                    if (clearSeenFlag) {
+                        window.__drIdmSeen = Object.create(null);
+                        seen = window.__drIdmSeen;
+                    }
+                    batchOut = [];
+                    scanRoot(document, 0);
+                    var metas = document.querySelectorAll('meta[property="og:video"], meta[property="og:video:url"], meta[property="og:video:secure_url"], meta[name="twitter:player:stream"]');
+                    for (var m = 0; m < metas.length; m++) {
+                        var c = metas[m].getAttribute('content');
+                        if (c && c.indexOf('http') === 0) report('video', c, 0, 0, 0, 'video/mp4');
+                    }
+                    var scripts = document.querySelectorAll('script[type="application/json"], script[type="application/ld+json"], script#__NEXT_DATA__');
                     for (var s = 0; s < scripts.length; s++) scanJsonText(scripts[s].textContent);
+                    scanPerformanceAndNetRing();
+                    return JSON.stringify(batchOut);
                 };
 
                 if (!window.__drIdmInstalled) {
                     window.__drIdmInstalled = true;
                     if (window.fetch && !window.fetch.__drIdm) {
                         var origFetch = window.fetch;
-                        window.fetch = function() {
+                        window.fetch = function(input) {
+                            try {
+                                var reqUrl = (typeof input === 'string') ? input : (input && input.url ? input.url : '');
+                                if (reqUrl) {
+                                    pushNetUrl(reqUrl);
+                                    if (looksLikeMediaUrl(reqUrl)) report('video', reqUrl, 0, 0, 0, '');
+                                }
+                            } catch (e) {}
                             var p = origFetch.apply(this, arguments);
                             try {
                                 p.then(function(r) {
-                                    var ct = (r.headers && r.headers.get('content-type')) || '';
-                                    if (ct.indexOf('json') >= 0 || ct.indexOf('mpegurl') >= 0 || ct.indexOf('text') >= 0) {
-                                        r.clone().text().then(scanJsonText).catch(function(){});
+                                    if (r && r.url) {
+                                        pushNetUrl(r.url);
+                                        var ct = (r.headers && r.headers.get('content-type')) || '';
+                                        if (ct.indexOf('video/') === 0 || ct.indexOf('audio/') === 0 || ct.indexOf('mpegurl') >= 0) {
+                                            report(ct.indexOf('audio/') === 0 ? 'audio' : 'video', r.url, 0, 0, 0, ct);
+                                        } else if (ct.indexOf('json') >= 0 || ct.indexOf('text') >= 0) {
+                                            r.clone().text().then(scanJsonText).catch(function(){});
+                                        }
                                     }
                                 }).catch(function(){});
                             } catch (e) {}
@@ -553,13 +658,30 @@ object VideoStreamSniffer {
                         };
                         window.fetch.__drIdm = 1;
                     }
-                    if (window.XMLHttpRequest && !XMLHttpRequest.prototype.send.__drIdm) {
+                    if (window.XMLHttpRequest && !XMLHttpRequest.prototype.open.__drIdm) {
+                        var origOpen = XMLHttpRequest.prototype.open;
+                        XMLHttpRequest.prototype.open = function(method, url) {
+                            try {
+                                if (url) {
+                                    this.__drUrl = String(url);
+                                    pushNetUrl(this.__drUrl);
+                                    if (looksLikeMediaUrl(this.__drUrl)) report('video', this.__drUrl, 0, 0, 0, '');
+                                }
+                            } catch (e) {}
+                            return origOpen.apply(this, arguments);
+                        };
+                        XMLHttpRequest.prototype.open.__drIdm = 1;
+
                         var origSend = XMLHttpRequest.prototype.send;
                         XMLHttpRequest.prototype.send = function() {
                             try {
                                 this.addEventListener('load', function() {
                                     try {
-                                        if (this.responseType === '' || this.responseType === 'text') {
+                                        var rUrl = this.responseURL || this.__drUrl || '';
+                                        var rCt = (this.getResponseHeader && this.getResponseHeader('content-type')) || '';
+                                        if (rUrl && (rCt.indexOf('video/') === 0 || rCt.indexOf('audio/') === 0 || rCt.indexOf('mpegurl') >= 0)) {
+                                            report(rCt.indexOf('audio/') === 0 ? 'audio' : 'video', rUrl, 0, 0, 0, rCt);
+                                        } else if (this.responseType === '' || this.responseType === 'text') {
                                             scanJsonText(this.responseText);
                                         }
                                     } catch (e) {}
@@ -567,7 +689,6 @@ object VideoStreamSniffer {
                             } catch (e) {}
                             return origSend.apply(this, arguments);
                         };
-                        XMLHttpRequest.prototype.send.__drIdm = 1;
                     }
                     if (window.MutationObserver && document.documentElement) {
                         new MutationObserver(function(muts) {
@@ -576,8 +697,8 @@ object VideoStreamSniffer {
                                 for (var j = 0; j < nodes.length; j++) {
                                     var n = nodes[j];
                                     if (n && n.nodeType === 1) {
-                                        if (n.tagName === 'VIDEO' || n.tagName === 'AUDIO') inspectMediaEl(n);
-                                        else if (n.querySelectorAll) scanRoot(n);
+                                        if (n.tagName === 'VIDEO' || n.tagName === 'AUDIO') inspectMediaEl(n, document);
+                                        else if (n.querySelectorAll) scanRoot(n, 1);
                                     }
                                 }
                             }
@@ -585,8 +706,19 @@ object VideoStreamSniffer {
                     }
                 }
 
-                window.__drIdmRescan();
-            } catch (err) {}
+                return window.__drIdmRescan(Boolean(forceClear));
+            } catch (err) {
+                return "[]";
+            }
+        })(false);
+    """
+
+    const val IDM_FORCE_RESCAN_JS = """
+        (function() {
+            if (typeof window.__drIdmRescan === 'function') {
+                return window.__drIdmRescan(true);
+            }
+            return "[]";
         })();
     """
 }

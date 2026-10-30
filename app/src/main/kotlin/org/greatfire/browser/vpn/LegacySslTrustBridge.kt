@@ -4,7 +4,7 @@ import android.content.Context
 import android.os.Build
 import android.util.Base64
 import android.util.Log
-import org.greatfire.browser.R
+import acr.browser.lightning.R
 import java.io.File
 import java.security.KeyStore
 import java.security.cert.CertificateFactory

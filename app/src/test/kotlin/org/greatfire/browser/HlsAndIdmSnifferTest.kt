@@ -147,4 +147,49 @@ class HlsAndIdmSnifferTest {
         VideoStreamSniffer.clearTab(tabId)
         assertEquals(0, VideoStreamSniffer.getCountForTab(tabId))
     }
+
+    @Test
+    fun rescanDiscoversNewlyLoadedDynamicVideosWithoutStaleSuppression() {
+        val tabId = "test_tab_rescan_2"
+        VideoStreamSniffer.clearTab(tabId)
+
+        // Initial page video #1
+        VideoStreamSniffer.recordCandidate(
+            tabId = tabId,
+            rawUrl = "https://cdn.site.org/videos/ep1_720p.mp4",
+            pageUrl = "https://site.org/series",
+            pageTitle = "Episode 1",
+            height = 720
+        )
+        assertEquals(1, VideoStreamSniffer.getCountForTab(tabId))
+
+        // User scrolls / clicks Episode 2 in an SPA and taps "Rescan" (اسکن دوباره):
+        // newly loaded m3u8 + 1080p mp4 must both be added and upgraded cleanly!
+        VideoStreamSniffer.recordCandidate(
+            tabId = tabId,
+            rawUrl = "https://cdn.site.org/videos/ep2_master.m3u8?token=fresh",
+            pageUrl = "https://site.org/series#ep2",
+            pageTitle = "Episode 2",
+            mimeHint = "application/vnd.apple.mpegurl",
+            width = 1920,
+            height = 1080,
+            durationSec = 1420
+        )
+        VideoStreamSniffer.recordCandidate(
+            tabId = tabId,
+            rawUrl = "https://cdn.site.org/videos/ep2_direct_1080p.mp4",
+            pageUrl = "https://site.org/series#ep2",
+            pageTitle = "Episode 2",
+            mimeHint = "video/mp4",
+            width = 1920,
+            height = 1080
+        )
+
+        val afterRescan = VideoStreamSniffer.getMediaForTab(tabId)
+        assertEquals(3, afterRescan.size)
+        assertTrue(afterRescan.any { it.url.contains("ep2_master.m3u8") })
+        assertTrue(afterRescan.any { it.url.contains("ep2_direct_1080p.mp4") })
+
+        VideoStreamSniffer.clearTab(tabId)
+    }
 }

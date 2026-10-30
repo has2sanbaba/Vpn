@@ -29,6 +29,11 @@ data class GatewayStatus(
     val gatewayPort: Int = 0,
     val readyNodes: Int = 0,
     val activeSources: Int = 0,
+    val configuredSources: Int = 50,
+    val reachableSources: Int = 0,
+    val lastRetestSecAgo: Long = -1L,
+    val nextRetestInSec: Long = 180L,
+    val retestCount: Long = 0L,
     val bestNode: String = "",
     val bestSource: String = "",
     val bestProto: String = "",
@@ -108,6 +113,9 @@ class TunnelManager private constructor(private val appContext: Context) {
     var gatewayPort: Int = 0
         private set
 
+    @Volatile
+    private var appInForeground: Boolean = true
+
     private var cachedClientPort: Int = -1
     private var cachedTunneledClient: OkHttpClient? = null
     private var cachedDownloadClient: OkHttpClient? = null
@@ -172,12 +180,56 @@ class TunnelManager private constructor(private val appContext: Context) {
     private fun startWatchdogLoop() {
         scope.launch {
             while (true) {
-                delay(4000)
+                delay(if (appInForeground) 12_000L else 45_000L)
+                if (!appInForeground) continue
                 if (gatewayPort <= 0) {
                     ensureRunning()
                 }
                 pollStatusOnce()
             }
+        }
+    }
+
+    fun setForeground(inForeground: Boolean) {
+        if (appInForeground == inForeground) return
+        appInForeground = inForeground
+        scope.launch {
+            if (gatewayPort > 0) {
+                val fgParam = if (inForeground) "1" else "0"
+                runCatching { NativeProxyBridge.controlRequest("POST", "/lifecycle?foreground=$fgParam") }
+                if (inForeground) {
+                    pollStatusOnce()
+                }
+            }
+        }
+    }
+
+    suspend fun runInstantRetest(): SwitchProxyResult = withContext(Dispatchers.IO) {
+        if (!ensureRunning()) {
+            return@withContext SwitchProxyResult(false, error = "موتور اتصال آماده نیست")
+        }
+        return@withContext try {
+            val raw = NativeProxyBridge.controlRequest("POST", "/retest", "{}")
+            val obj = JSONObject(raw.ifBlank { "{}" })
+            val ok = obj.optBoolean("ok", false)
+            if (ok) {
+                pollStatusOnce()
+            }
+            SwitchProxyResult(
+                ok = ok,
+                switchedFrom = obj.optString("switched_from", ""),
+                bestId = obj.optString("best_id", ""),
+                bestNode = obj.optString("best_node", ""),
+                bestSource = obj.optString("best_source", ""),
+                bestProto = obj.optString("best_proto", ""),
+                bestRttMs = obj.optLong("best_rtt_ms", 0L),
+                bestSpeedKbps = obj.optLong("best_speed_kbps", 0L),
+                readyNodes = obj.optInt("ready_nodes", 0),
+                activeSources = obj.optInt("active_sources", 0),
+                error = obj.optString("error", "").ifBlank { null }
+            )
+        } catch (t: Throwable) {
+            SwitchProxyResult(false, error = t.message)
         }
     }
 
@@ -192,6 +244,11 @@ class TunnelManager private constructor(private val appContext: Context) {
                 gatewayPort = gatewayPort,
                 readyNodes = json.optInt("ready_nodes", 0),
                 activeSources = json.optInt("active_sources", 0),
+                configuredSources = json.optInt("configured_sources", 50),
+                reachableSources = json.optInt("reachable_sources", 0),
+                lastRetestSecAgo = json.optLong("last_retest_sec_ago", -1L),
+                nextRetestInSec = json.optLong("next_retest_in_sec", 180L),
+                retestCount = json.optLong("retest_count", 0L),
                 bestNode = json.optString("best_node", ""),
                 bestSource = json.optString("best_source", ""),
                 bestProto = json.optString("best_proto", ""),

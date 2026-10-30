@@ -41,18 +41,61 @@ func ghMirrors(ownerRepo, branch, path string) []string {
 	}
 }
 
-// 10 genuinely independent, actively updated multi-protocol proxy sources (VLESS, VMess, Trojan, SS)
+const autoRetestInterval = 3 * time.Minute
+
+// 50 verified, actively updated (Oct 2026) reputable multi-protocol proxy sources on GitHub
+// (VLESS XHTTP/Reality/WS/gRPC/TCP, VMess, Trojan, Shadowsocks, Base64 & raw subscriptions).
 var defaultFeedSources = []FeedSource{
+	{Name: "RadikalTop", Mirrors: ghMirrors("0xRadikal/Free-v2ray-Configs", "main", "top100.txt")},
 	{Name: "FreeXray", Mirrors: ghMirrors("noahclanman/free-xray-gcp", "main", "output/fast/configs.txt")},
 	{Name: "F0rc3Run", Mirrors: ghMirrors("F0rc3Run/F0rc3Run", "main", "Best-Results/proxies.txt")},
 	{Name: "Bahemmat", Mirrors: ghMirrors("MohammadBahemmat/V2ray-Collector", "main", "Tested.txt")},
 	{Name: "iBoxz", Mirrors: ghMirrors("iboxz/free-v2ray-collector", "main", "main/mix.txt")},
 	{Name: "MahdiBland", Mirrors: ghMirrors("mahdibland/V2RayAggregator", "master", "Eternity.txt")},
-	{Name: "Radikal", Mirrors: ghMirrors("0xRadikal/Free-v2ray-Configs", "main", "Countries/Germany.txt")},
-	{Name: "Matin", Mirrors: ghMirrors("MatinGhanbari/v2ray-configs", "main", "subscriptions/base64/subs/sub1.txt")},
+	{Name: "MatinSuper", Mirrors: ghMirrors("MatinGhanbari/v2ray-configs", "main", "subscriptions/v2ray/super-sub.txt")},
 	{Name: "BarryFar", Mirrors: ghMirrors("barry-far/V2ray-Config", "main", "Base64/Sub1_base64.txt")},
 	{Name: "Au1rxx", Mirrors: ghMirrors("Au1rxx/free-vpn-subscriptions", "main", "output/all-verified/v2ray-base64-0001.txt")},
 	{Name: "Igareck", Mirrors: ghMirrors("igareck/vpn-configs-for-russia", "main", "BLACK_SS+All_RUS.txt")},
+	{Name: "Alirewa", Mirrors: ghMirrors("Alirewa/V2ray-Configs", "main", "sub1.txt")},
+	{Name: "Morpheus", Mirrors: ghMirrors("morpheusadam/v2ray-config", "main", "subs/bundles/lite.txt")},
+	{Name: "Mehrtat", Mirrors: ghMirrors("mehrtat/vless-collector", "main", "sub.txt")},
+	{Name: "Jeddi", Mirrors: ghMirrors("AhmadJeddi/V2RayCFGDumper", "main", "sub.txt")},
+	{Name: "Tahanian", Mirrors: ghMirrors("miladtahanian/Config-Collector", "main", "mixed_iran.txt")},
+	{Name: "YebekhePSG", Mirrors: ghMirrors("itsyebekhe/PSG", "main", "config.txt")},
+	{Name: "DeltaSNI", Mirrors: ghMirrors("Delta-Kronecker/V2ray-Config", "main", "config/batches/sni_v2ray/batch_001.txt")},
+	{Name: "Bijandi", Mirrors: ghMirrors("amir-reza-bijandi/v2ray-configs", "main", "configs.txt")},
+	{Name: "RoosterKid", Mirrors: ghMirrors("roosterkid/openproxylist", "main", "V2RAY_RAW.txt")},
+	{Name: "AnonMulti", Mirrors: ghMirrors("4n0nymou3/multi-proxy-config-fetcher", "main", "configs/proxy_configs.txt")},
+	{Name: "V2RayRoot", Mirrors: ghMirrors("V2RayRoot/V2RayConfig", "main", "Config/vless.txt")},
+	{Name: "NdsSpeed", Mirrors: ghMirrors("ndsphonemy/proxy-sub", "main", "speed.txt")},
+	{Name: "NoMoreWalls", Mirrors: ghMirrors("peasoft/NoMoreWalls", "master", "list_raw.txt")},
+	{Name: "Pawdroid", Mirrors: ghMirrors("Pawdroid/Free-servers", "main", "sub")},
+	{Name: "Ripao", Mirrors: ghMirrors("ripaojiedian/freenode", "main", "sub")},
+	{Name: "SnakePool", Mirrors: ghMirrors("snakem982/proxypool", "main", "source/v2ray-2.txt")},
+	{Name: "SoliSpirit", Mirrors: ghMirrors("SoliSpirit/v2ray-configs", "main", "Subscriptions/Sub1.txt")},
+	{Name: "Mahdi0024", Mirrors: ghMirrors("Mahdi0024/ProxyCollector", "master", "sub/proxies.txt")},
+	{Name: "TaheriTrj", Mirrors: ghMirrors("MhdiTaheri/V2rayCollector", "main", "sub/trojan")},
+	{Name: "TaheriMix", Mirrors: ghMirrors("MhdiTaheri/V2rayCollector_Py", "main", "sub/Mix/mix.txt")},
+	{Name: "Lagzian", Mirrors: ghMirrors("lagzian/SS-Collector", "main", "configs/jp/vless.txt")},
+	{Name: "FreedomSS", Mirrors: ghMirrors("MahanKenway/Freedom-V2Ray", "main", "configs/ss_sub.txt")},
+	{Name: "MohamadFG", Mirrors: ghMirrors("mohamadfg-dev/telegram-v2ray-configs-collector", "main", "category/vless.txt")},
+	{Name: "AsgharSub", Mirrors: ghMirrors("asgharkapk/Sub-Config-Extractor", "main", "input_subs/sssub.txt")},
+	{Name: "SolVPN", Mirrors: ghMirrors("SoliSpirit/SolVPN", "main", "Subscribes/sub1.txt")},
+	{Name: "Kasesm", Mirrors: ghMirrors("kasesm/Free-Config", "main", "trojan_sub.txt")},
+	{Name: "Darmioniks", Mirrors: ghMirrors("Darmioniks/proxy-and-vless-collector", "main", "vless_filtered.txt")},
+	{Name: "SylphNet", Mirrors: ghMirrors("ProblemTheCode/SylphNet-public", "main", "sub/sub_plain.txt")},
+	{Name: "IdolVPN", Mirrors: ghMirrors("Idolvpn/Automate-V2ray-Config-Collector", "main", "configs/vless.txt")},
+	{Name: "BlackCrow", Mirrors: ghMirrors("nukcrow/black-crow", "main", "sub/test")},
+	{Name: "AmirKMA", Mirrors: ghMirrors("amirkma/proxykma", "main", "mix.txt")},
+	{Name: "ProxyRift", Mirrors: ghMirrors("rekt0ro/ProxyRift", "main", "subscriptions/light.txt")},
+	{Name: "NodeZixf", Mirrors: ghMirrors("chenzhihan1751-cyber/node-sub-zixf", "main", "sub/v2ray.txt")},
+	{Name: "ViraVLESS", Mirrors: ghMirrors("PlanAslii/vira-v2ray-configs", "main", "protocols/vless.txt")},
+	{Name: "HappSub", Mirrors: ghMirrors("Andrejewild/happ-v2rayng-configs", "main", "sub.txt")},
+	{Name: "AlirezaSrv", Mirrors: ghMirrors("alireza786786/Free-V2ray-Configs", "main", "servers/vless_servers.txt")},
+	{Name: "SsbaxysGeo", Mirrors: ghMirrors("ssbaxys/v2ray-configs", "main", "geo-configs.txt")},
+	{Name: "CNTCafe", Mirrors: ghMirrors("CNT-Cafe/Public-Configs", "main", "test-configs.txt")},
+	{Name: "SkyVPN", Mirrors: ghMirrors("vxstream/SkyVPN", "main", "sub.txt")},
+	{Name: "MrPaster", Mirrors: ghMirrors("mrpaster12/config-proxy-collector", "main", "sub_raw.txt")},
 }
 
 type scoredNode struct {
@@ -173,12 +216,20 @@ type NodePool struct {
 	customNode    *OutboundNode
 
 	// Custom probe hook for deterministic unit tests; nil in production
-	probeHook func(node OutboundNode) (rttMs int64, speedKbps int64, ok bool)
+	probeHook     func(node OutboundNode) (rttMs int64, speedKbps int64, ok bool)
+	onBestChanged func()
 
-	firstReadyOnce sync.Once
-	firstReadyCh   chan struct{}
-	refreshing     atomic.Bool
-	stopCh         chan struct{}
+	firstReadyOnce   sync.Once
+	firstReadyCh     chan struct{}
+	refreshing       atomic.Bool
+	retesting        atomic.Bool
+	inForeground     atomic.Bool
+	reachableSources atomic.Int32
+	lastRetestUnix   atomic.Int64
+	nextRetestUnix   atomic.Int64
+	retestCount      atomic.Uint64
+	retestSweepIdx   atomic.Uint32
+	stopCh           chan struct{}
 }
 
 func NewNodePool(doh *DoHResolver, dataDir string) *NodePool {
@@ -196,9 +247,65 @@ func NewNodePool(doh *DoHResolver, dataDir string) *NodePool {
 		firstReadyCh:    make(chan struct{}),
 		stopCh:          make(chan struct{}),
 	}
+	p.inForeground.Store(true)
+	p.nextRetestUnix.Store(time.Now().Add(autoRetestInterval).Unix())
 	p.loadCustomStore()
 	p.loadCachedNodes()
 	return p
+}
+
+func (p *NodePool) SetOnBestChanged(fn func()) {
+	p.mu.Lock()
+	p.onBestChanged = fn
+	p.mu.Unlock()
+}
+
+func (p *NodePool) ConfiguredSourcesCount() int {
+	p.mu.RLock()
+	subs := len(p.customSubs)
+	p.mu.RUnlock()
+	return len(defaultFeedSources) + subs
+}
+
+func (p *NodePool) ReachableSourcesCount() int {
+	v := int(p.reachableSources.Load())
+	if active := p.ActiveSourcesCount(); active > v {
+		return active
+	}
+	return v
+}
+
+func (p *NodePool) RetestMetrics() (lastAgoSec int64, nextInSec int64, count uint64) {
+	now := time.Now().Unix()
+	last := p.lastRetestUnix.Load()
+	next := p.nextRetestUnix.Load()
+	if last > 0 && now >= last {
+		lastAgoSec = now - last
+	} else {
+		lastAgoSec = -1
+	}
+	if next > now {
+		nextInSec = next - now
+	} else {
+		nextInSec = 0
+	}
+	return lastAgoSec, nextInSec, p.retestCount.Load()
+}
+
+// SetForeground lets Android lifecycle pause background re-probing when the app is minimized
+// (0% idle CPU/battery drain) and trigger an immediate freshness check if stale on resume.
+func (p *NodePool) SetForeground(fg bool) {
+	wasFG := p.inForeground.Swap(fg)
+	if fg && !wasFG {
+		last := p.lastRetestUnix.Load()
+		if last == 0 || time.Since(time.Unix(last, 0)) >= autoRetestInterval {
+			go func() {
+				ctx, cancel := context.WithTimeout(context.Background(), 6*time.Second)
+				defer cancel()
+				_ = p.RunAutoRetest(ctx)
+			}()
+		}
+	}
 }
 
 func (p *NodePool) loadCustomStore() {
@@ -321,8 +428,8 @@ func (p *NodePool) sortReadyLocked() {
 	})
 }
 
-// StartBackground launches BOTH multi-source seed probing AND 10-source live CDN feed fetching
-// simultaneously at t=0ms, then triggers a second tunnel-assisted multi-source sweep if needed.
+// StartBackground launches BOTH multi-source seed probing AND 50-source live feed fetching
+// simultaneously at t=0ms, then automatically re-tests and promotes the fastest proxy every 3 minutes.
 func (p *NodePool) StartBackground() {
 	p.RefreshFromFeedsAsync()
 
@@ -351,28 +458,169 @@ func (p *NodePool) StartBackground() {
 			}
 		}
 
-		p.probeCandidatesConcurrent(existing, 28, 18)
+		p.probeCandidatesConcurrent(existing, 20, 16)
+		p.lastRetestUnix.Store(time.Now().Unix())
+		p.nextRetestUnix.Store(time.Now().Add(autoRetestInterval).Unix())
 
 		// Once at least one seed/tunnel node is up, ensure diverse live sources were collected
-		if p.ActiveSourcesCount() < 4 {
+		if p.ActiveSourcesCount() < 5 {
 			p.RefreshFromFeedsAsync()
 		}
 
-		ticker := time.NewTicker(5 * time.Minute)
+		ticker := time.NewTicker(autoRetestInterval)
 		defer ticker.Stop()
+		cycle := 0
 		for {
 			select {
 			case <-ticker.C:
-				if p.ReadyCount() < 6 || p.ActiveSourcesCount() < 3 {
-					p.RefreshFromFeedsAsync()
-				} else {
-					p.reverifyCurrentPool()
+				cycle++
+				p.nextRetestUnix.Store(time.Now().Add(autoRetestInterval).Unix())
+				if !p.inForeground.Load() {
+					continue
 				}
+				if cycle%4 == 0 || p.ReadyCount() < 8 || p.ActiveSourcesCount() < 5 {
+					p.RefreshFromFeedsAsync()
+				}
+				ctx, cancel := context.WithTimeout(context.Background(), 6500*time.Millisecond)
+				_ = p.RunAutoRetest(ctx)
+				cancel()
 			case <-p.stopCh:
 				return
 			}
 		}
 	}()
+}
+
+// RunAutoRetest benchmarks currently active nodes plus fresh candidates from the 50-source pool,
+// evicts dead/slow servers, and hot-swaps to any faster server without interrupting open streams.
+func (p *NodePool) RunAutoRetest(ctx context.Context) SwitchBestResult {
+	if !p.retesting.CompareAndSwap(false, true) {
+		name, src, proto, rtt, spd, cnt, actSrc := p.BestNodeSummary()
+		return SwitchBestResult{
+			OK:            cnt > 0,
+			BestNode:      name,
+			BestSource:    src,
+			BestProto:     proto,
+			BestRTTMs:     rtt,
+			BestSpeedKbps: spd,
+			ReadyNodes:    cnt,
+			ActiveSources: actSrc,
+		}
+	}
+	defer p.retesting.Store(false)
+
+	p.mu.RLock()
+	var prevTopID, prevTopName string
+	if len(p.ready) > 0 {
+		prevTopID = p.ready[0].Node.ID
+		prevTopName = p.ready[0].Node.Name
+	}
+	seen := make(map[string]bool, 40)
+	candidates := make([]OutboundNode, 0, 34)
+	for i := 0; i < len(p.ready) && len(candidates) < 14; i++ {
+		n := p.ready[i].Node
+		if !seen[n.ID] {
+			seen[n.ID] = true
+			candidates = append(candidates, n)
+		}
+	}
+	if len(p.feedPool) > 0 {
+		startIdx := int(p.retestSweepIdx.Add(20)-20) % len(p.feedPool)
+		for step := 0; step < len(p.feedPool) && len(candidates) < 34; step++ {
+			fn := p.feedPool[(startIdx+step)%len(p.feedPool)]
+			if !seen[fn.ID] && p.excludedUntil[fn.ID].IsZero() {
+				seen[fn.ID] = true
+				candidates = append(candidates, fn)
+			}
+		}
+	}
+	readyIDs := make(map[string]bool, len(p.ready))
+	for _, s := range p.ready {
+		readyIDs[s.Node.ID] = true
+	}
+	onChanged := p.onBestChanged
+	p.mu.RUnlock()
+
+	if len(candidates) == 0 {
+		p.RefreshFromFeedsAsync()
+		return SwitchBestResult{OK: false, Error: "در حال دریافت لیست سرورها از ۵۰ منبع زنده..."}
+	}
+
+	// Probe in parallel with 14 lightweight workers and track failures on existing ready nodes
+	workers := 14
+	if workers > len(candidates) {
+		workers = len(candidates)
+	}
+	jobs := make(chan OutboundNode, len(candidates))
+	for _, c := range candidates {
+		jobs <- c
+	}
+	close(jobs)
+
+	var wg sync.WaitGroup
+	for w := 0; w < workers; w++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for node := range jobs {
+				if ctx.Err() != nil {
+					return
+				}
+				rtt, kbps, ok := p.evaluateNode(ctx, node)
+				if ok {
+					p.upsertVerifiedNode(node, rtt, kbps)
+				} else if readyIDs[node.ID] {
+					p.RecordFailure(node.ID)
+				}
+			}
+		}()
+	}
+	wg.Wait()
+
+	p.lastRetestUnix.Store(time.Now().Unix())
+	p.nextRetestUnix.Store(time.Now().Add(autoRetestInterval).Unix())
+	p.retestCount.Add(1)
+	p.saveCachedNodes()
+
+	p.mu.Lock()
+	// Allow faster auto-discovered server to win unless user explicitly pinned a custom node
+	if p.pinnedID != "" {
+		isCustomPinned := false
+		for _, cn := range p.customNodes {
+			if cn.ID == p.pinnedID {
+				isCustomPinned = true
+				break
+			}
+		}
+		if !isCustomPinned {
+			p.pinnedID = ""
+		}
+	}
+	p.sortReadyLocked()
+	var res SwitchBestResult
+	var newTopID string
+	if len(p.ready) > 0 {
+		top := p.ready[0]
+		newTopID = top.Node.ID
+		res = SwitchBestResult{
+			OK:            true,
+			SwitchedFrom:  prevTopName,
+			BestID:        top.Node.ID,
+			BestNode:      top.Node.Name,
+			BestSource:    firstNonEmpty(top.Node.Source, "Global"),
+			BestProto:     string(top.Node.Protocol),
+			BestRTTMs:     top.AvgRTTMs,
+			BestSpeedKbps: top.SpeedKbps,
+			ReadyNodes:    len(p.ready),
+		}
+	}
+	p.mu.Unlock()
+	res.ActiveSources = p.ActiveSourcesCount()
+
+	if newTopID != "" && newTopID != prevTopID && onChanged != nil {
+		onChanged()
+	}
+	return res
 }
 
 func (p *NodePool) Close() {
@@ -558,15 +806,32 @@ func (p *NodePool) AddCustomInput(ctx context.Context, rawInput string) CustomAd
 		}
 	}
 
-	// Even if live probe to youtube timed out right now, if the user explicitly added 1 config and wants to try it,
-	// keep it in customNodes and test basic TCP dial; if reachable, upsert with conservative RTT so user can select it!
+	// Fallback probe against gstatic generate_204 in case YouTube rate-limited the exit IP
 	first := parsed[0]
-	dialCtx, dialCancel := context.WithTimeout(ctx, 2500*time.Millisecond)
-	rawConn, dialErr := DialOutboundNode(dialCtx, p.doh, first, "www.gstatic.com", "443")
-	dialCancel()
+	dialCtx, dialCancel := context.WithTimeout(ctx, 3500*time.Millisecond)
+	t0 := time.Now()
+	rawConn, dialErr := DialOutboundNode(dialCtx, p.doh, first, "connectivitycheck.gstatic.com", "443")
 	if dialErr == nil && rawConn != nil {
+		_ = rawConn.SetDeadline(time.Now().Add(2500 * time.Millisecond))
+		tlsConn := tls.Client(rawConn, &tls.Config{
+			ServerName: "connectivitycheck.gstatic.com",
+			RootCAs:    AndroidRootCertPool(),
+			NextProtos: []string{"http/1.1"},
+			MinVersion: tls.VersionTLS12,
+		})
+		hsErr := tlsConn.HandshakeContext(dialCtx)
+		if hsErr == nil {
+			_, _ = tlsConn.Write([]byte("GET /generate_204 HTTP/1.1\r\nHost: connectivitycheck.gstatic.com\r\nConnection: close\r\n\r\n"))
+			var respBuf [128]byte
+			_, _ = tlsConn.Read(respBuf[:])
+		}
 		_ = rawConn.Close()
-		p.upsertVerifiedNode(first, 320, 1500)
+		dialCancel()
+		measuredRTT := time.Since(t0).Milliseconds()
+		if measuredRTT <= 0 {
+			measuredRTT = 220
+		}
+		p.upsertVerifiedNode(first, measuredRTT, 3500)
 		bestRes := p.pinFastestAmongIDs([]OutboundNode{first})
 		return CustomAddResult{
 			OK:           true,
@@ -575,10 +840,11 @@ func (p *NodePool) AddCustomInput(ctx context.Context, rawInput string) CustomAd
 			BestID:       bestRes.BestID,
 			BestNode:     bestRes.BestNode,
 			BestProto:    bestRes.BestProto,
-			BestRTTMs:    320,
-			Message:      fmt.Sprintf("✅ کانفیگ ذخیره و فعال شد: %s", first.Name),
+			BestRTTMs:    measuredRTT,
+			Message:      fmt.Sprintf("✅ متصل به کانفیگ اختصاصی: %s (%dms)", first.Name, measuredRTT),
 		}
 	}
+	dialCancel()
 
 	return CustomAddResult{
 		OK:           true,
@@ -1148,18 +1414,25 @@ func (p *NodePool) RefreshFromFeedsAsync() {
 		}
 		sources = append(sources, defaultFeedSources...)
 
+		// Shared HTTP/1.1 + DoH + uTLS transport across all 50 feed fetches to minimize RAM & socket churn!
+		sharedDirectTr := p.newDirectFeedTransport()
+		defer sharedDirectTr.CloseIdleConnections()
+
 		type feedRes struct {
 			idx   int
 			nodes []OutboundNode
 		}
 		ch := make(chan feedRes, len(sources))
+		sem := make(chan struct{}, 10) // Max 10 concurrent feed HTTP requests for low CPU/RAM
 		var wg sync.WaitGroup
 
 		for idx, src := range sources {
 			wg.Add(1)
 			go func(i int, fs FeedSource) {
 				defer wg.Done()
-				nodes := p.fetchSourceWithFailover(fs)
+				sem <- struct{}{}
+				defer func() { <-sem }()
+				nodes := p.fetchSourceWithTransport(fs, sharedDirectTr)
 				if len(nodes) > 0 {
 					ch <- feedRes{idx: i, nodes: nodes}
 				}
@@ -1173,15 +1446,27 @@ func (p *NodePool) RefreshFromFeedsAsync() {
 
 		collected := make([][]OutboundNode, len(sources))
 		sourcesSucceeded := 0
+		earlyProbed := false
+
 		for res := range ch {
 			if res.idx >= 0 && res.idx < len(collected) && len(res.nodes) > 0 {
 				collected[res.idx] = res.nodes
 				sourcesSucceeded++
+				p.reachableSources.Store(int32(sourcesSucceeded))
+
+				// Early fast-connect burst: as soon as 6 sources arrive and pool is cold, start probing right away!
+				if !earlyProbed && sourcesSucceeded >= 6 && p.ReadyCount() < 3 {
+					earlyProbed = true
+					earlyBatch := interleaveNodeGroups(collected, 24)
+					if len(earlyBatch) > 0 {
+						go p.probeCandidatesConcurrent(earlyBatch, 16, 6)
+					}
+				}
 			}
 		}
 
-		// Round-robin interleave across ALL independent sources so every collector contributes!
-		candidates := interleaveNodeGroups(collected, 140)
+		// Round-robin interleave across ALL 50 independent sources so every collector contributes!
+		candidates := interleaveNodeGroups(collected, 220)
 		if len(candidates) == 0 {
 			return
 		}
@@ -1190,55 +1475,31 @@ func (p *NodePool) RefreshFromFeedsAsync() {
 		p.feedPool = append([]OutboundNode(nil), candidates...)
 		p.mu.Unlock()
 
-		// Keep top 40 interleaved fast nodes in order + shuffle remainder for maximum diversity
-		if len(candidates) > 40 {
-			tail := candidates[40:]
+		// Keep top 50 interleaved fast nodes (1 from each source!) + shuffle remainder for diversity
+		if len(candidates) > 50 {
+			tail := candidates[50:]
 			rand.Shuffle(len(tail), func(i, j int) {
 				tail[i], tail[j] = tail[j], tail[i]
 			})
 		}
-		if len(candidates) > 100 {
-			candidates = candidates[:100]
+		if len(candidates) > 120 {
+			candidates = candidates[:120]
 		}
 
-		log.Printf("[gfproxy-pool] Fetched from %d independent sources; benchmarking %d interleaved nodes...", sourcesSucceeded, len(candidates))
-		p.probeCandidatesConcurrent(candidates, 28, 20)
+		log.Printf("[gfproxy-pool] Fetched from %d/%d live sources; benchmarking %d interleaved nodes...", sourcesSucceeded, len(sources), len(candidates))
+		p.probeCandidatesConcurrent(candidates, 22, 24)
+		p.lastRetestUnix.Store(time.Now().Unix())
+		p.nextRetestUnix.Store(time.Now().Add(autoRetestInterval).Unix())
 		p.saveCachedNodes()
 	}()
 }
 
-func (p *NodePool) fetchSourceWithFailover(fs FeedSource) []OutboundNode {
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-
-	for _, mirrorURL := range fs.Mirrors {
-		body := p.fetchSingleURL(ctx, mirrorURL)
-		if body == "" {
-			continue
-		}
-		parsed := ParseShareLinksWithSource(body, fs.Name)
-		if len(parsed) > 0 {
-			for i := range parsed {
-				parsed[i].Source = fs.Name
-			}
-			if len(parsed) > 36 {
-				parsed = parsed[:36]
-			}
-			return parsed
-		}
-	}
-	return nil
-}
-
-// fetchSingleURL fetches subscription content via HTTP/1.1 DoH + TLS SNI fragmentation
-// (forceHTTP11=true so Go's http.Transport never speaks HTTP/1.1 over an ALPN h2 socket!),
-// with automatic fallback through the fastest active tunnel node.
-func (p *NodePool) fetchSingleURL(parentCtx context.Context, feedURL string) string {
-	ctx, cancel := context.WithTimeout(parentCtx, 6500*time.Millisecond)
-	defer cancel()
-
-	tr := &http.Transport{
-		ForceAttemptHTTP2: false,
+func (p *NodePool) newDirectFeedTransport() *http.Transport {
+	return &http.Transport{
+		ForceAttemptHTTP2:   false,
+		MaxIdleConns:        16,
+		MaxIdleConnsPerHost: 4,
+		IdleConnTimeout:     15 * time.Second,
 		DialTLSContext: func(dialCtx context.Context, _, addr string) (net.Conn, error) {
 			host, port, err := net.SplitHostPort(addr)
 			if err != nil {
@@ -1250,7 +1511,7 @@ func (p *NodePool) fetchSingleURL(parentCtx context.Context, feedURL string) str
 				return nil, err
 			}
 			var d net.Dialer
-			d.Timeout = 3000 * time.Millisecond
+			d.Timeout = 2800 * time.Millisecond
 			raw, err := d.DialContext(dialCtx, "tcp", net.JoinHostPort(ips[0], port))
 			if err != nil {
 				return nil, err
@@ -1269,20 +1530,55 @@ func (p *NodePool) fetchSingleURL(parentCtx context.Context, feedURL string) str
 				host = ips[0]
 			}
 			var d net.Dialer
-			d.Timeout = 3000 * time.Millisecond
+			d.Timeout = 2800 * time.Millisecond
 			return d.DialContext(dialCtx, "tcp", net.JoinHostPort(host, port))
 		},
 	}
-	defer tr.CloseIdleConnections()
+}
 
-	client := &http.Client{Transport: tr, Timeout: 6000 * time.Millisecond}
+func (p *NodePool) fetchSourceWithTransport(fs FeedSource, sharedTr *http.Transport) []OutboundNode {
+	ctx, cancel := context.WithTimeout(context.Background(), 9*time.Second)
+	defer cancel()
+
+	for _, mirrorURL := range fs.Mirrors {
+		body := p.fetchSingleURLWithTransport(ctx, mirrorURL, sharedTr)
+		if body == "" {
+			continue
+		}
+		parsed := ParseShareLinksWithSource(body, fs.Name)
+		if len(parsed) > 0 {
+			for i := range parsed {
+				parsed[i].Source = fs.Name
+			}
+			if len(parsed) > 24 {
+				parsed = parsed[:24]
+			}
+			return parsed
+		}
+	}
+	return nil
+}
+
+// fetchSingleURL fetches subscription content via HTTP/1.1 DoH + TLS SNI fragmentation,
+// with automatic fallback through the fastest active tunnel node.
+func (p *NodePool) fetchSingleURL(parentCtx context.Context, feedURL string) string {
+	tr := p.newDirectFeedTransport()
+	defer tr.CloseIdleConnections()
+	return p.fetchSingleURLWithTransport(parentCtx, feedURL, tr)
+}
+
+func (p *NodePool) fetchSingleURLWithTransport(parentCtx context.Context, feedURL string, directTr *http.Transport) string {
+	ctx, cancel := context.WithTimeout(parentCtx, 5500*time.Millisecond)
+	defer cancel()
+
+	client := &http.Client{Transport: directTr, Timeout: 5200 * time.Millisecond}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, feedURL, nil)
 	if err == nil {
 		req.Header.Set("User-Agent", "v2rayNG/1.8.38 Mozilla/5.0 Chrome/130.0.0.0")
 		if resp, doErr := client.Do(req); doErr == nil {
-			b, rErr := io.ReadAll(io.LimitReader(resp.Body, 896*1024))
+			b, rErr := io.ReadAll(io.LimitReader(resp.Body, 512*1024))
 			_ = resp.Body.Close()
-			if resp.StatusCode == http.StatusOK && rErr == nil && len(b) > 24 {
+			if resp.StatusCode == http.StatusOK && rErr == nil && len(b) > 20 {
 				return string(b)
 			}
 		}
@@ -1291,7 +1587,7 @@ func (p *NodePool) fetchSingleURL(parentCtx context.Context, feedURL string) str
 	// Fallback: fetch through an already-verified tunnel node if ISP blocked direct CDN access
 	nodes := p.PickNodes(parentCtx, 1, 0)
 	if len(nodes) > 0 {
-		tunCtx, tunCancel := context.WithTimeout(parentCtx, 5500*time.Millisecond)
+		tunCtx, tunCancel := context.WithTimeout(parentCtx, 5000*time.Millisecond)
 		defer tunCancel()
 		tunTr := &http.Transport{
 			ForceAttemptHTTP2: false,
@@ -1327,14 +1623,14 @@ func (p *NodePool) fetchSingleURL(parentCtx context.Context, feedURL string) str
 			},
 		}
 		defer tunTr.CloseIdleConnections()
-		tunClient := &http.Client{Transport: tunTr, Timeout: 5200 * time.Millisecond}
+		tunClient := &http.Client{Transport: tunTr, Timeout: 4800 * time.Millisecond}
 		req2, r2Err := http.NewRequestWithContext(tunCtx, http.MethodGet, feedURL, nil)
 		if r2Err == nil {
 			req2.Header.Set("User-Agent", "v2rayNG/1.8.38 Mozilla/5.0 Chrome/130.0.0.0")
 			if resp2, err2 := tunClient.Do(req2); err2 == nil {
-				b, rErr := io.ReadAll(io.LimitReader(resp2.Body, 896*1024))
+				b, rErr := io.ReadAll(io.LimitReader(resp2.Body, 512*1024))
 				_ = resp2.Body.Close()
-				if resp2.StatusCode == http.StatusOK && rErr == nil && len(b) > 24 {
+				if resp2.StatusCode == http.StatusOK && rErr == nil && len(b) > 20 {
 					return string(b)
 				}
 			}
