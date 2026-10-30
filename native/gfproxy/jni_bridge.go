@@ -65,12 +65,13 @@ func stringToJavaBytes(env *C.JNIEnv, s string) C.jbyteArray {
 //export Java_org_greatfire_browser_vpn_NativeProxyBridge_nativeStart
 func Java_org_greatfire_browser_vpn_NativeProxyBridge_nativeStart(
 	env *C.JNIEnv,
-	_ C.jclass,
+	clazz C.jclass,
 	jDataDir C.jbyteArray,
 	jCaPemPath C.jbyteArray,
 	jFbConfigPath C.jbyteArray,
 	jCustomURI C.jbyteArray,
 ) C.jint {
+	_ = clazz
 	jniMu.Lock()
 	defer jniMu.Unlock()
 
@@ -133,11 +134,12 @@ func Java_org_greatfire_browser_vpn_NativeProxyBridge_nativeStart(
 //export Java_org_greatfire_browser_vpn_NativeProxyBridge_nativeControl
 func Java_org_greatfire_browser_vpn_NativeProxyBridge_nativeControl(
 	env *C.JNIEnv,
-	_ C.jclass,
+	clazz C.jclass,
 	jMethod C.jbyteArray,
 	jPath C.jbyteArray,
 	jBody C.jbyteArray,
 ) C.jbyteArray {
+	_ = clazz
 	jniMu.Lock()
 	mux := jniControlMux
 	jniMu.Unlock()
@@ -152,9 +154,11 @@ func Java_org_greatfire_browser_vpn_NativeProxyBridge_nativeControl(
 
 //export Java_org_greatfire_browser_vpn_NativeProxyBridge_nativeStop
 func Java_org_greatfire_browser_vpn_NativeProxyBridge_nativeStop(
-	_ *C.JNIEnv,
-	_ C.jclass,
+	env *C.JNIEnv,
+	clazz C.jclass,
 ) {
+	_ = env
+	_ = clazz
 	jniMu.Lock()
 	gw := jniGateway
 	jniGateway = nil
