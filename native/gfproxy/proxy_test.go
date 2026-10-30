@@ -1072,7 +1072,8 @@ func TestVLESSXHTTPLoopbackPacketUpAndStreamOne(t *testing.T) {
 		}
 	}
 
-	ts := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = http.NewResponseController(w).EnableFullDuplex()
 		if r.URL.RawQuery != "ed=2056" {
 			http.Error(w, "missing query ed=2056", http.StatusBadRequest)
 			return
@@ -1115,42 +1116,59 @@ func TestVLESSXHTTPLoopbackPacketUpAndStreamOne(t *testing.T) {
 			return
 		}
 		http.NotFound(w, r)
-	}))
-	defer ts.Close()
+	})
 
-	srvURL, _ := url.Parse(ts.URL)
-	host, port, _ := net.SplitHostPort(srvURL.Host)
-	doh := NewDoHResolver()
+	for _, enableH2 := range []bool{true, false} {
+		ts := httptest.NewUnstartedServer(handler)
+		ts.EnableHTTP2 = enableH2
+		ts.StartTLS()
 
-	for _, mode := range []string{"auto", "stream-one"} {
-		uri := "vless://e947d49f-e235-4e89-9411-5df3ff17acc3@" + host + ":" + port +
-			"?mode=" + mode + "&path=%2Fdl%3Fed%3D2056&security=tls&encryption=none&host=t.gptban.com&fp=chrome&type=xhttp&allowInsecure=1&sni=t.gptban.com#Test-" + mode
-		node, ok := ParseSingleShareLink(uri)
-		if !ok {
-			t.Fatalf("parse failed for mode=%s", mode)
-		}
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		conn, err := DialOutboundNode(ctx, doh, node, "example.com", "443")
-		if err != nil {
-			cancel()
-			t.Fatalf("DialOutboundNode xhttp mode=%s failed: %v", mode, err)
-		}
-		if _, err := conn.Write([]byte("PING")); err != nil {
+		srvURL, _ := url.Parse(ts.URL)
+		host, port, _ := net.SplitHostPort(srvURL.Host)
+		doh := NewDoHResolver()
+
+		for _, mode := range []string{"auto", "stream-one"} {
+			uri := "vless://e947d49f-e235-4e89-9411-5df3ff17acc3@" + host + ":" + port +
+				"?mode=" + mode + "&path=%2Fdl%3Fed%3D2056&security=tls&encryption=none&host=t.gptban.com&fp=chrome&type=xhttp&allowInsecure=1&sni=t.gptban.com#Test-" + mode
+			node, ok := ParseSingleShareLink(uri)
+			if !ok {
+				ts.CloseClientConnections()
+				ts.Close()
+				t.Fatalf("parse failed for h2=%v mode=%s", enableH2, mode)
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			conn, err := DialOutboundNode(ctx, doh, node, "example.com", "443")
+			if err != nil {
+				cancel()
+				ts.CloseClientConnections()
+				ts.Close()
+				t.Fatalf("DialOutboundNode xhttp h2=%v mode=%s failed: %v", enableH2, mode, err)
+			}
+			if _, err := conn.Write([]byte("PING")); err != nil {
+				_ = conn.Close()
+				cancel()
+				ts.CloseClientConnections()
+				ts.Close()
+				t.Fatalf("write over xhttp h2=%v mode=%s failed: %v", enableH2, mode, err)
+			}
+			reply := make([]byte, 9)
+			if _, err := io.ReadFull(conn, reply); err != nil {
+				_ = conn.Close()
+				cancel()
+				ts.CloseClientConnections()
+				ts.Close()
+				t.Fatalf("read over xhttp h2=%v mode=%s failed: %v", enableH2, mode, err)
+			}
 			_ = conn.Close()
 			cancel()
-			t.Fatalf("write over xhttp mode=%s failed: %v", mode, err)
+			if string(reply) != "PONG:PING" {
+				ts.CloseClientConnections()
+				ts.Close()
+				t.Fatalf("unexpected xhttp h2=%v mode=%s reply: %q", enableH2, mode, string(reply))
+			}
 		}
-		reply := make([]byte, 9)
-		if _, err := io.ReadFull(conn, reply); err != nil {
-			_ = conn.Close()
-			cancel()
-			t.Fatalf("read over xhttp mode=%s failed: %v", mode, err)
-		}
-		_ = conn.Close()
-		cancel()
-		if string(reply) != "PONG:PING" {
-			t.Fatalf("unexpected xhttp mode=%s reply: %q", mode, string(reply))
-		}
+		ts.CloseClientConnections()
+		ts.Close()
 	}
 }
 

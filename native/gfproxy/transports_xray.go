@@ -740,6 +740,26 @@ func buildXHTTPRoundTripper(doh *DoHResolver, node OutboundNode) (http.RoundTrip
 	}
 
 	var usedFirst atomic.Bool
+	var connsMu sync.Mutex
+	activeConns := []net.Conn{firstTLS}
+	trackConn := func(c net.Conn) net.Conn {
+		connsMu.Lock()
+		activeConns = append(activeConns, c)
+		connsMu.Unlock()
+		return c
+	}
+	closeAllTracked := func() {
+		connsMu.Lock()
+		list := append([]net.Conn(nil), activeConns...)
+		activeConns = nil
+		connsMu.Unlock()
+		for _, c := range list {
+			if c != nil {
+				_ = c.Close()
+			}
+		}
+	}
+
 	takeFirstOrDial := func(ctx context.Context, wantProtos []string) (net.Conn, error) {
 		if usedFirst.CompareAndSwap(false, true) {
 			return firstTLS, nil
@@ -754,7 +774,7 @@ func buildXHTTPRoundTripper(doh *DoHResolver, node OutboundNode) (http.RoundTrip
 				_ = raw.Close()
 				return nil, rErr
 			}
-			return c, nil
+			return trackConn(c), nil
 		}
 		frag := NewFragmentingConn(raw, 20, 2*time.Millisecond)
 		c, _, tErr := handshakeTLSWithALPN(ctx, frag, sni, node.Fingerprint, wantProtos, insecure)
@@ -762,7 +782,7 @@ func buildXHTTPRoundTripper(doh *DoHResolver, node OutboundNode) (http.RoundTrip
 			_ = raw.Close()
 			return nil, tErr
 		}
-		return c, nil
+		return trackConn(c), nil
 	}
 
 	if negProto == "h2" {
@@ -774,10 +794,8 @@ func buildXHTTPRoundTripper(doh *DoHResolver, node OutboundNode) (http.RoundTrip
 			},
 		}
 		cleanup := func() {
-			if usedFirst.CompareAndSwap(false, true) {
-				_ = firstTLS.Close()
-			}
 			h2Tr.CloseIdleConnections()
+			closeAllTracked()
 		}
 		return h2Tr, cleanup, nil
 	}
@@ -792,10 +810,8 @@ func buildXHTTPRoundTripper(doh *DoHResolver, node OutboundNode) (http.RoundTrip
 		},
 	}
 	cleanup := func() {
-		if usedFirst.CompareAndSwap(false, true) {
-			_ = firstTLS.Close()
-		}
 		h1Tr.CloseIdleConnections()
+		closeAllTracked()
 	}
 	return h1Tr, cleanup, nil
 }
@@ -866,6 +882,74 @@ func dialXHTTPStream(ctx context.Context, doh *DoHResolver, node OutboundNode) (
 		xc.upPipeW = pw
 
 		streamURL := baseURL
+		// When server negotiated HTTP/1.1 instead of HTTP/2, Go's stdlib http.Transport
+		// is half-duplex (waits for req.Body EOF before returning resp). Perform raw
+		// full-duplex HTTP/1.1 chunked streaming directly over the TLS connection.
+		if h1Tr, isH1 := rt.(*http.Transport); isH1 && h1Tr.DialTLSContext != nil {
+			h1Conn, dErr := h1Tr.DialTLSContext(ctx, "tcp", reqHost)
+			if dErr != nil {
+				cancel()
+				cleanup()
+				return nil, dErr
+			}
+			reqURI := streamURL.RequestURI()
+			referer := makeXHTTPPaddingReferer(baseURL)
+			hdr := "POST " + reqURI + " HTTP/1.1\r\n" +
+				"Host: " + reqHost + "\r\n" +
+				"User-Agent: " + browserUA + "\r\n" +
+				"Referer: " + referer + "\r\n" +
+				"Content-Type: application/grpc\r\n" +
+				"Transfer-Encoding: chunked\r\n\r\n"
+			if _, wErr := io.WriteString(h1Conn, hdr); wErr != nil {
+				cancel()
+				cleanup()
+				return nil, wErr
+			}
+			go func() {
+				defer func() { _ = pr.Close() }()
+				buf := make([]byte, 32*1024)
+				for {
+					n, rErr := pr.Read(buf)
+					if n > 0 {
+						chunkHdr := strconv.FormatInt(int64(n), 16) + "\r\n"
+						if _, err := io.WriteString(h1Conn, chunkHdr); err != nil {
+							return
+						}
+						if _, err := h1Conn.Write(buf[:n]); err != nil {
+							return
+						}
+						if _, err := io.WriteString(h1Conn, "\r\n"); err != nil {
+							return
+						}
+					}
+					if rErr != nil {
+						_, _ = io.WriteString(h1Conn, "0\r\n\r\n")
+						return
+					}
+				}
+			}()
+			go func() {
+				dummyReq, _ := http.NewRequest(http.MethodPost, streamURL.String(), nil)
+				resp, rErr := http.ReadResponse(bufio.NewReader(h1Conn), dummyReq)
+				if rErr != nil {
+					xc.downErr = rErr
+					close(xc.downReady)
+					_ = pr.Close()
+					return
+				}
+				if resp.StatusCode != http.StatusOK {
+					_ = resp.Body.Close()
+					xc.downErr = fmt.Errorf("xhttp stream-one H1 HTTP %d", resp.StatusCode)
+					close(xc.downReady)
+					_ = pr.Close()
+					return
+				}
+				xc.downBody = resp.Body
+				close(xc.downReady)
+			}()
+			return xc, nil
+		}
+
 		req, rErr := http.NewRequestWithContext(connCtx, http.MethodPost, streamURL.String(), pr)
 		if rErr != nil {
 			cancel()

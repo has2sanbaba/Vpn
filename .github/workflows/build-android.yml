@@ -21,6 +21,10 @@ on:
 permissions:
   contents: write
 
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   build-android:
     name: Build & Verify Dr Browser v7.0 (API 21–35+, All 4 ABIs, Play Protect Clean)
@@ -58,7 +62,7 @@ jobs:
         run: |
           set +e
           GOTOOLCHAIN=auto go mod tidy > go_test.log 2>&1
-          GOTOOLCHAIN=auto go test -v -race ./... >> go_test.log 2>&1
+          GOTOOLCHAIN=auto go test -v -race -timeout 90s ./... >> go_test.log 2>&1
           RC=$?
           cat go_test.log
           if [[ "$RC" -ne 0 ]]; then
