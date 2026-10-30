@@ -1,4 +1,4 @@
-name: Build Dr Browser v7.0 (Lightning Privacy Base + 50-Source XHTTP Proxy + IDM)
+name: Build Dr Browser v8.0 (Sticky Anti-Censorship Proxy + Audio HLS + Resumable IDM)
 
 on:
   push:
@@ -27,7 +27,7 @@ concurrency:
 
 jobs:
   build-android:
-    name: Build & Verify Dr Browser v7.0 (API 21–35+, All 4 ABIs, Play Protect Clean)
+    name: Build & Verify Dr Browser v8.0 (API 21–35+, All 4 ABIs, Play Protect Clean)
     runs-on: ubuntu-latest
     timeout-minutes: 30
 

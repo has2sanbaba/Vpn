@@ -553,11 +553,14 @@ func (p *NodePool) runRetestInternal(ctx context.Context, applyFastest bool) Swi
 	}
 	defer p.retesting.Store(false)
 
-	p.mu.RLock()
+	p.mu.Lock()
 	var prevTopID, prevTopName string
 	if len(p.ready) > 0 {
 		prevTopID = p.ready[0].Node.ID
 		prevTopName = p.ready[0].Node.Name
+		if !applyFastest && p.pinnedID == "" {
+			p.pinnedID = prevTopID
+		}
 	}
 	lockedID := p.pinnedID
 	seen := make(map[string]bool, 40)
@@ -584,7 +587,7 @@ func (p *NodePool) runRetestInternal(ctx context.Context, applyFastest bool) Swi
 		readyIDs[s.Node.ID] = true
 	}
 	onChanged := p.onBestChanged
-	p.mu.RUnlock()
+	p.mu.Unlock()
 
 	if len(candidates) == 0 {
 		p.RefreshFromFeedsAsync()
@@ -1416,8 +1419,13 @@ func (p *NodePool) PickNodes(ctx context.Context, maxNodes int, coldWait time.Du
 		timer.Stop()
 	}
 
-	p.mu.RLock()
-	defer p.mu.RUnlock()
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	if p.customNode == nil && p.pinnedID == "" && !p.startupSelectPhase.Load() && len(p.ready) > 0 {
+		// Pin the active server on first real traffic selection so the user's exit IP never shifts mid-session!
+		p.pinnedID = p.ready[0].Node.ID
+	}
 
 	var out []OutboundNode
 	seen := make(map[string]bool)
@@ -1531,14 +1539,10 @@ func (p *NodePool) upsertVerifiedNode(node OutboundNode, rttMs int64, speedKbps 
 		})
 	}
 	p.sortReadyLocked()
-	if !p.startupSelectPhase.Load() && p.pinnedID == "" && len(p.ready) > 0 {
-		p.pinnedID = p.ready[0].Node.ID
-		p.sortReadyLocked()
-	}
 	if len(p.ready) > 28 {
 		p.ready = p.ready[:28]
 	}
-	if !p.startupSelectPhase.Load() {
+	if !p.startupSelectPhase.Load() && p.pinnedID != "" {
 		p.evaluateUpgradeSuggestionLocked()
 	}
 	p.mu.Unlock()
