@@ -88,6 +88,28 @@
                                 app:tabIconTextSize="14dp" />
                         </FrameLayout>
 
+                        <ImageView
+                            android:id="@+id/toolbar_back"
+                            android:layout_width="36dp"
+                            android:layout_height="match_parent"
+                            android:background="?attr/actionBarItemBackground"
+                            android:clickable="true"
+                            android:contentDescription="@string/action_back"
+                            android:focusable="true"
+                            android:scaleType="center"
+                            app:srcCompat="@drawable/ic_action_back" />
+
+                        <ImageView
+                            android:id="@+id/toolbar_forward"
+                            android:layout_width="36dp"
+                            android:layout_height="match_parent"
+                            android:background="?attr/actionBarItemBackground"
+                            android:clickable="true"
+                            android:contentDescription="@string/action_forward"
+                            android:focusable="true"
+                            android:scaleType="center"
+                            app:srcCompat="@drawable/ic_action_forward" />
+
                         <androidx.constraintlayout.widget.ConstraintLayout
                             android:id="@+id/search_container"
                             android:layout_width="0dp"

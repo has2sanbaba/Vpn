@@ -90,6 +90,8 @@ abstract class BrowserActivity : ThemableBrowserActivity() {
     private lateinit var bookmarksAdapter: BookmarkRecyclerViewAdapter
     private var activeRecyclerView: RecyclerView? = null
 
+    private var menuItemBack: MenuItem? = null
+    private var menuItemForward: MenuItem? = null
     private var menuItemShare: MenuItem? = null
     private var menuItemCopyLink: MenuItem? = null
     private var menuItemAddToHome: MenuItem? = null
@@ -343,6 +345,8 @@ abstract class BrowserActivity : ThemableBrowserActivity() {
         binding.findQuit.setOnClickListener { presenter.onFindDismiss() }
 
         binding.homeButton.setOnClickListener { presenter.onTabCountViewClick() }
+        binding.toolbarBack.setOnClickListener { presenter.onBackClick() }
+        binding.toolbarForward.setOnClickListener { presenter.onForwardClick() }
         binding.actionBack.setOnClickListener { presenter.onBackClick() }
         binding.actionForward.setOnClickListener { presenter.onForwardClick() }
         binding.actionHome.setOnClickListener { presenter.onHomeClick() }
@@ -377,17 +381,33 @@ abstract class BrowserActivity : ThemableBrowserActivity() {
         presenter.onViewDetached()
     }
 
+    override fun onStart() {
+        super.onStart()
+        org.greatfire.browser.vpn.TunnelManager.getInstance(this).setForeground(true)
+        runCatching { tabPager.activeWebView()?.resumeTimers() }
+    }
+
     override fun onPause() {
         super.onPause()
         presenter.onViewHidden()
     }
 
+    override fun onStop() {
+        super.onStop()
+        org.greatfire.browser.vpn.TunnelManager.getInstance(this).setForeground(false)
+        runCatching { tabPager.activeWebView()?.pauseTimers() }
+    }
+
     override fun onCreateOptionsMenu(menu: Menu): Boolean {
         menuInflater.inflate(menu(), menu)
+        menuItemBack = menu.findItem(R.id.action_back)
+        menuItemForward = menu.findItem(R.id.action_forward)
         menuItemShare = menu.findItem(R.id.action_share)
         menuItemCopyLink = menu.findItem(R.id.action_copy)
         menuItemAddToHome = menu.findItem(R.id.action_add_to_homescreen)
         menuItemAddBookmark = menu.findItem(R.id.action_add_bookmark)
+        menuItemBack?.isEnabled = binding.toolbarBack.isEnabled
+        menuItemForward?.isEnabled = binding.toolbarForward.isEnabled
         return super.onCreateOptionsMenu(menu)
     }
 
@@ -415,8 +435,18 @@ abstract class BrowserActivity : ThemableBrowserActivity() {
      * @see BrowserContract.View.renderState
      */
     fun renderState(viewState: PartialBrowserViewState) {
-        viewState.isBackEnabled?.let { binding.actionBack.isEnabled = it }
-        viewState.isForwardEnabled?.let { binding.actionForward.isEnabled = it }
+        viewState.isBackEnabled?.let {
+            binding.actionBack.isEnabled = it
+            binding.toolbarBack.isEnabled = it
+            binding.toolbarBack.alpha = if (it) 1.0f else 0.36f
+            menuItemBack?.isEnabled = it
+        }
+        viewState.isForwardEnabled?.let {
+            binding.actionForward.isEnabled = it
+            binding.toolbarForward.isEnabled = it
+            binding.toolbarForward.alpha = if (it) 1.0f else 0.36f
+            menuItemForward?.isEnabled = it
+        }
         viewState.displayUrl?.let(binding.search::setText)
         viewState.sslState?.let {
             binding.searchSslStatus.setImageDrawable(createSslDrawableForState(it))

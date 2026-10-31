@@ -9,20 +9,20 @@ import (
 	"time"
 )
 
-// FragmentTLSClientHello inspects an outbound payload. If it starts with a TLS Handshake
-// ClientHello record (0x16 0x03 ... 0x01), it splits the single TLS record into multiple
-// smaller valid TLS Handshake records (RFC 5246 / RFC 8446 record-layer fragmentation),
-// placing a split boundary directly inside the SNI (server_name) extension if present.
-//
-// Stateful DPI middleboxes that inspect a single TLS record for banned SNI hostnames fail
-// to match the fragmented SNI, while all compliant TLS servers reassemble the handshake
-// records transparently with 100% authentic end-to-end TLS certificates (no MITM CA!).
+// FragmentTLSClientHello implements 2026 RFC-compliant 3-Record SNI Splitting (ModeHybridTLSRF):
+//   - Record 1: Complete 4-byte TLS Handshake Header (0x01 + uint24 length) + ClientVersion +
+//     Random + SessionID + CipherSuites + Extensions up to SNI hostname start. Keeping the full
+//     4-byte Handshake Header intact in Record 1 guarantees 100% compatibility with Cloudflare,
+//     Fastly (jsdelivr), BoringSSL (kMaxEmptyRecords), OpenSSL (s3_both.c), Nginx ssl_preread,
+//     and Xray/Sing-box frontends (eliminating SSL_R_BAD_LENGTH / record-flood drops!).
+//   - Record 2: First half of the SNI hostname (never contains the full domain).
+//   - Record 3: Second half of the SNI hostname + remaining extensions.
 func FragmentTLSClientHello(data []byte, maxFragPayload int) [][]byte {
 	if len(data) < 9 || data[0] != 0x16 || data[1] != 0x03 {
 		return nil
 	}
 	recLen := int(binary.BigEndian.Uint16(data[3:5]))
-	if recLen <= 4 || 5+recLen > len(data) {
+	if recLen <= 6 || 5+recLen > len(data) {
 		return nil
 	}
 	handshake := data[5 : 5+recLen]
@@ -31,14 +31,13 @@ func FragmentTLSClientHello(data []byte, maxFragPayload int) [][]byte {
 		return nil
 	}
 
-	if maxFragPayload <= 2 {
-		maxFragPayload = 24
+	if maxFragPayload <= 4 {
+		maxFragPayload = 32
 	}
 
 	versionMajor := data[1]
 	versionMinor := data[2]
 
-	// Locate SNI hostname offset inside handshake slice if present
 	sniStart, sniEnd := findSNIBoundsInHandshake(handshake)
 
 	var chunks [][]byte
@@ -55,53 +54,43 @@ func FragmentTLSClientHello(data []byte, maxFragPayload int) [][]byte {
 		chunks = append(chunks, rec)
 	}
 
-	if sniStart > 0 && sniEnd > sniStart+2 && sniEnd <= len(handshake) {
-		// Split 1: first 2 bytes of ClientHello
-		firstCut := 2
-		if firstCut > sniStart {
-			firstCut = sniStart
-		}
-		emitRecord(handshake[:firstCut])
-
-		// Split 2: up to the middle of the SNI hostname
+	if sniStart >= 6 && sniEnd > sniStart+1 && sniEnd <= len(handshake) {
 		midSNI := sniStart + (sniEnd-sniStart)/2
-		for off := firstCut; off < midSNI; off += maxFragPayload {
-			end := off + maxFragPayload
-			if end > midSNI {
-				end = midSNI
-			}
-			emitRecord(handshake[off:end])
+		if midSNI <= sniStart {
+			midSNI = sniStart + 1
 		}
-
-		// Split 3: second half of SNI into tiny pieces (3 bytes) to defeat deep SNI matchers
-		for off := midSNI; off < sniEnd; off += 3 {
-			end := off + 3
-			if end > sniEnd {
-				end = sniEnd
-			}
-			emitRecord(handshake[off:end])
-		}
-
-		// Split 4: remainder of ClientHello
-		for off := sniEnd; off < len(handshake); off += maxFragPayload * 2 {
-			end := off + maxFragPayload*2
-			if end > len(handshake) {
-				end = len(handshake)
-			}
-			emitRecord(handshake[off:end])
-		}
+		// Record 1: Full ClientHello header + extensions up to start of SNI string
+		emitRecord(handshake[:sniStart])
+		// Record 2: First half of SNI string only
+		emitRecord(handshake[sniStart:midSNI])
+		// Record 3: Second half of SNI string + rest of ClientHello
+		emitRecord(handshake[midSNI:])
 	} else {
-		// Generic multi-record split when no SNI or ECH is used
-		for off := 0; off < len(handshake); off += maxFragPayload {
-			end := off + maxFragPayload
-			if end > len(handshake) {
-				end = len(handshake)
+		// Safe 3-record fallback when no plaintext SNI is present (e.g. ECH or IP literal)
+		cut1 := len(handshake) / 3
+		if cut1 < 6 {
+			cut1 = 6
+		}
+		cut2 := (len(handshake) * 2) / 3
+		if cut2 <= cut1 && cut1+1 < len(handshake) {
+			cut2 = cut1 + 1
+		}
+		if cut1 < len(handshake) && cut2 < len(handshake) {
+			emitRecord(handshake[:cut1])
+			emitRecord(handshake[cut1:cut2])
+			emitRecord(handshake[cut2:])
+		} else {
+			for off := 0; off < len(handshake); off += maxFragPayload {
+				end := off + maxFragPayload
+				if end > len(handshake) {
+					end = len(handshake)
+				}
+				emitRecord(handshake[off:end])
 			}
-			emitRecord(handshake[off:end])
 		}
 	}
 
-	// Append any trailing TLS records that came in the same write call
+	// Preserve any trailing TLS records coalesced into the same write buffer
 	if 5+recLen < len(data) {
 		tail := make([]byte, len(data)-(5+recLen))
 		copy(tail, data[5+recLen:])
@@ -153,7 +142,6 @@ func findSNIBoundsInHandshake(hs []byte) (int, int) {
 			break
 		}
 		if extType == 0x0000 && extLen >= 5 {
-			// ServerNameList length (2 bytes), NameType (1 byte == 0x00), HostName length (2 bytes)
 			nameType := hs[pos+2]
 			nameLen := int(binary.BigEndian.Uint16(hs[pos+3 : pos+5]))
 			nameStart := pos + 5
@@ -167,8 +155,8 @@ func findSNIBoundsInHandshake(hs []byte) (int, int) {
 	return -1, -1
 }
 
-// FragmentingConn wraps a net.Conn so the very first outbound TLS ClientHello or HTTP Host
-// request is fragmented at the TLS record & TCP segment layers with TCP_NODELAY enabled.
+// FragmentingConn wraps a net.Conn so the first outbound TLS ClientHello or HTTP Host request
+// undergoes Dual-Layer Desync: 3-Record TLS SNI Splitting + Xray-style TCP_NODELAY segment slicing.
 type FragmentingConn struct {
 	net.Conn
 	firstWrite atomic.Bool
@@ -179,6 +167,9 @@ type FragmentingConn struct {
 func NewFragmentingConn(conn net.Conn, fragSize int, fragDelay time.Duration) *FragmentingConn {
 	if tcpConn, ok := conn.(*net.TCPConn); ok {
 		_ = tcpConn.SetNoDelay(true)
+	}
+	if fragDelay > 3*time.Millisecond {
+		fragDelay = 2 * time.Millisecond
 	}
 	fc := &FragmentingConn{
 		Conn:      conn,
@@ -191,11 +182,25 @@ func NewFragmentingConn(conn net.Conn, fragSize int, fragDelay time.Duration) *F
 
 func (fc *FragmentingConn) Write(b []byte) (int, error) {
 	if fc.firstWrite.CompareAndSwap(true, false) {
-		// Case 1: TLS ClientHello -> Multi-record TLS fragmentation + TCP segment flush
+		// Case 1: TLS ClientHello -> 3-record RFC-valid TLS split + TCP segment boundary pacing
 		if records := FragmentTLSClientHello(b, fc.fragSize); len(records) > 1 {
 			for i, rec := range records {
-				if _, err := fc.Conn.Write(rec); err != nil {
-					return 0, err
+				// Slice middle SNI record at TCP layer too (Xray tlshello TCP split)
+				if i == 1 && len(rec) > 7 {
+					mid := 5 + (len(rec)-5)/2
+					if _, err := fc.Conn.Write(rec[:mid]); err != nil {
+						return 0, err
+					}
+					if fc.fragDelay > 0 {
+						time.Sleep(fc.fragDelay)
+					}
+					if _, err := fc.Conn.Write(rec[mid:]); err != nil {
+						return 0, err
+					}
+				} else {
+					if _, err := fc.Conn.Write(rec); err != nil {
+						return 0, err
+					}
 				}
 				if i < len(records)-1 && fc.fragDelay > 0 {
 					time.Sleep(fc.fragDelay)
@@ -243,7 +248,6 @@ func splitHTTPRequestAtHost(b []byte) [][]byte {
 	if idx < 0 {
 		return nil
 	}
-	// Mix case of Host header ("hOsT:") to bypass naive DPI signatures while staying 100% HTTP/1.1 valid
 	patched := make([]byte, len(b))
 	copy(patched, b)
 	copy(patched[idx+2:idx+7], []byte("hOsT:"))

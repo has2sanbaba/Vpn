@@ -22,8 +22,8 @@ android {
         // Android 5.0 Lollipop (API 21) -> Android 15/16+ (API 35+)
         minSdk = 21
         targetSdk = 35
-        versionCode = 800
-        versionName = "8.0.0"
+        versionCode = 900
+        versionName = "9.0.0"
 
         buildConfigField("boolean", "FULL_VERSION", "Boolean.parseBoolean(\"true\")")
 

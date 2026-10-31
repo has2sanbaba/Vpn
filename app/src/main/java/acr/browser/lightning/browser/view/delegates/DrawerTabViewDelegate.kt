@@ -39,6 +39,8 @@ class DrawerTabViewDelegate(binding: BrowserActivityDrawerBinding) : ViewDelegat
     override val findNext: ImageButton = binding.findNext
     override val findQuit: ImageButton = binding.findQuit
     override val homeButton: FrameLayout = binding.homeButton
+    override val toolbarBack: ImageView = binding.toolbarBack
+    override val toolbarForward: ImageView = binding.toolbarForward
     override val actionBack: ImageView = binding.actionBack
     override val actionForward: ImageView = binding.actionForward
     override val actionHome: ImageView = binding.actionHome

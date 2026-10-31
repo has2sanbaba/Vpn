@@ -121,20 +121,38 @@ func parseALPNList(raw string, defaultProtos []string) []string {
 	return out
 }
 
+var cfCleanEdgeCursor atomic.Uint32
+
+func nextCleanCloudflareEdges(n int) []string {
+	total := len(cleanCloudflareEdgeIPs)
+	if total == 0 || n <= 0 {
+		return nil
+	}
+	if n > total {
+		n = total
+	}
+	start := int(cfCleanEdgeCursor.Add(1)-1) % total
+	out := make([]string, 0, n)
+	for i := 0; i < n; i++ {
+		out = append(out, cleanCloudflareEdgeIPs[(start+i)%total])
+	}
+	return out
+}
+
 func dialRawNodeTCP(ctx context.Context, doh *DoHResolver, node OutboundNode) (net.Conn, error) {
 	var candidateIPs []string
 	isCFTransport := node.TLS && (node.Transport == "ws" || node.Transport == "xhttp" || node.Transport == "httpupgrade" || node.Transport == "grpc")
 	if ip := net.ParseIP(node.Host); ip != nil {
 		candidateIPs = append(candidateIPs, ip.String())
 		if isCFTransport && isCloudflareIP(ip.String()) {
-			candidateIPs = append(candidateIPs, cleanCloudflareEdgeIPs[:2]...)
+			candidateIPs = append(candidateIPs, nextCleanCloudflareEdges(2)...)
 		}
 	} else if doh != nil {
 		ips, err := doh.Resolve(ctx, node.Host)
 		if err == nil && len(ips) > 0 {
 			candidateIPs = append(candidateIPs, ips[0])
 			if isCFTransport && isCloudflareIP(ips[0]) {
-				candidateIPs = append(candidateIPs, cleanCloudflareEdgeIPs[0])
+				candidateIPs = append(candidateIPs, nextCleanCloudflareEdges(2)...)
 			}
 		}
 	}
@@ -145,9 +163,9 @@ func dialRawNodeTCP(ctx context.Context, doh *DoHResolver, node OutboundNode) (n
 	var rawConn net.Conn
 	var lastErr error
 	for i, dialHost := range candidateIPs {
-		perAttemptTimeout := 3200 * time.Millisecond
+		perAttemptTimeout := 2800 * time.Millisecond
 		if i > 0 {
-			perAttemptTimeout = 2400 * time.Millisecond
+			perAttemptTimeout = 2000 * time.Millisecond
 		}
 		var d net.Dialer
 		d.Timeout = perAttemptTimeout
@@ -156,7 +174,7 @@ func dialRawNodeTCP(ctx context.Context, doh *DoHResolver, node OutboundNode) (n
 			if tcpConn, ok := c.(*net.TCPConn); ok {
 				_ = tcpConn.SetNoDelay(true)
 				_ = tcpConn.SetKeepAlive(true)
-				_ = tcpConn.SetKeepAlivePeriod(30 * time.Second)
+				_ = tcpConn.SetKeepAlivePeriod(45 * time.Second)
 			}
 			rawConn = c
 			break

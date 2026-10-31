@@ -33,6 +33,7 @@ import okhttp3.Call
 import okhttp3.Request
 import org.greatfire.browser.data.BrowserDataStore
 import org.greatfire.browser.data.DownloadRecord
+import org.greatfire.browser.media.VideoStreamSniffer
 import org.greatfire.browser.data.DownloadState
 import org.greatfire.browser.media.HlsPlaylistParser
 import org.greatfire.browser.vpn.TunnelManager
@@ -700,21 +701,34 @@ class DownloadEngine private constructor(private val appContext: Context) {
         val byteRange: HlsPlaylistParser.ByteRangeSpec?,
         val aesKeyUrl: String?,
         val aesIv: ByteArray?,
-        val stripPackedAudioId3: Boolean
+        val stripPackedAudioId3: Boolean,
+        val isFmp4Fragment: Boolean = false
     )
 
     /**
      * IDM Resumable HLS (`.m3u8`) Video + Separate Audio Concurrent Segment Downloader & MP4 Merger!
-     * - Supports `#EXT-X-MEDIA:TYPE=AUDIO` separate audio renditions (never downloads mute video!).
-     * - Supports `#EXT-X-MAP` (`fMP4`), `#EXT-X-BYTERANGE`, Packed-Audio `ID3`/ADTS, and `METHOD=AES-128`.
+     * - Supports `#EXT-X-MEDIA:TYPE=AUDIO` separate audio renditions AND auto-pairs sibling page
+     *   audio sub-playlists when a player exposed a mute video sub-playlist directly.
+     * - Normalizes `#EXT-X-MAP` (`fMP4` `.m4s` `styp`/`sidx` stripping), MPEG-TS `0x47` sync alignment,
+     *   `#EXT-X-BYTERANGE`, Packed-Audio `ID3`/ADTS, and `METHOD=AES-128`.
      * - Persists every completed segment atomically as `<targetFile>.hlsdir/<seg>.done` so Pause -> Resume
      *   continues immediately from the exact segment where it stopped!
      */
     private suspend fun runHlsStreamDownload(initialRecord: DownloadRecord, targetFile: File) {
         var videoPlaylistUrl = initialRecord.url
         var audioPlaylistUrl = initialRecord.secondaryAudioUrl.trim().ifBlank { null }
+        if (audioPlaylistUrl == null) {
+            audioPlaylistUrl = VideoStreamSniffer.findSiblingAudioForVideoUrl(
+                videoUrl = videoPlaylistUrl,
+                pageUrl = initialRecord.refererUrl
+            )?.takeIf { it.isNotBlank() }
+        }
 
-        var manifestText = fetchTextThroughTunnel(initialRecord, videoPlaylistUrl)
+        var manifestText = VideoStreamSniffer.getCachedHlsManifest(videoPlaylistUrl)
+            ?: fetchTextThroughTunnel(initialRecord, videoPlaylistUrl)
+        if (!HlsPlaylistParser.looksLikeHlsManifest(manifestText)) {
+            manifestText = fetchTextThroughTunnel(initialRecord, videoPlaylistUrl)
+        }
         if (!HlsPlaylistParser.looksLikeHlsManifest(manifestText)) {
             throw IllegalStateException("لیست پخش استریم (.m3u8) معتبر نیست یا منقضی شده است")
         }
@@ -729,7 +743,8 @@ class DownloadEngine private constructor(private val appContext: Context) {
             if (audioPlaylistUrl == null && !chosen.audioUrl.isNullOrBlank()) {
                 audioPlaylistUrl = chosen.audioUrl
             }
-            manifestText = fetchTextThroughTunnel(initialRecord, videoPlaylistUrl)
+            manifestText = VideoStreamSniffer.getCachedHlsManifest(videoPlaylistUrl)
+                ?: fetchTextThroughTunnel(initialRecord, videoPlaylistUrl)
         }
 
         val videoPlaylist = HlsPlaylistParser.parseMediaPlaylist(manifestText, videoPlaylistUrl)
@@ -742,7 +757,8 @@ class DownloadEngine private constructor(private val appContext: Context) {
 
         val audioPlaylist = if (!audioPlaylistUrl.isNullOrBlank() && audioPlaylistUrl != videoPlaylistUrl) {
             runCatching {
-                val aBody = fetchTextThroughTunnel(initialRecord, audioPlaylistUrl)
+                val aBody = VideoStreamSniffer.getCachedHlsManifest(audioPlaylistUrl)
+                    ?: fetchTextThroughTunnel(initialRecord, audioPlaylistUrl)
                 if (HlsPlaylistParser.looksLikeHlsManifest(aBody) && !HlsPlaylistParser.isMasterPlaylist(aBody)) {
                     val parsedA = HlsPlaylistParser.parseMediaPlaylist(aBody, audioPlaylistUrl)
                     if (!parsedA.isDrmOrEncrypted && parsedA.segments.isNotEmpty()) parsedA else null
@@ -801,7 +817,7 @@ class DownloadEngine private constructor(private val appContext: Context) {
         )
 
         val aesKeyCache = ConcurrentHashMap<String, ByteArray>()
-        val limiter = Semaphore(4)
+        val limiter = Semaphore(3)
 
         coroutineScope {
             allTasks.map { task ->
@@ -832,8 +848,11 @@ class DownloadEngine private constructor(private val appContext: Context) {
                                 sequence = task.sequence
                             )
                         }
-                        if (task.stripPackedAudioId3) {
+                        if (task.isFmp4Fragment) {
+                            bytes = MediaRemuxer.stripFmp4NonFragmentBoxes(bytes)
+                        } else if (task.stripPackedAudioId3) {
                             bytes = HlsPlaylistParser.stripPackedAudioId3Headers(bytes)
+                            bytes = MediaRemuxer.alignToTsSyncPacket(bytes)
                         }
 
                         val tmpFile = File(hlsDir, "${task.fileName}.tmp")
@@ -850,10 +869,10 @@ class DownloadEngine private constructor(private val appContext: Context) {
                         val doneCnt = completedUnitsAtomic.incrementAndGet()
                         val nowBytes = bytesWrittenAtomic.addAndGet(bytes.size.toLong())
                         val now = System.currentTimeMillis()
-                        if (now - lastReportMs >= 320L || doneCnt == totalUnits) {
+                        if (now - lastReportMs >= 420L || doneCnt == totalUnits) {
                             synchronized(reportLock) {
                                 val elapsed = now - lastReportMs
-                                if (elapsed >= 320L || doneCnt == totalUnits) {
+                                if (elapsed >= 420L || doneCnt == totalUnits) {
                                     val delta = (nowBytes - bytesAtLastReport).coerceAtLeast(0L)
                                     val bps = (delta * 1000L) / elapsed.coerceAtLeast(1L)
                                     lastReportMs = now
@@ -880,18 +899,21 @@ class DownloadEngine private constructor(private val appContext: Context) {
         coroutineContext.ensureActive()
 
         // Concatenate video segments (+ audio segments if separate #EXT-X-MEDIA:TYPE=AUDIO exists)
-        val assembledVideo = File(hlsDir, "assembled_video.stream")
+        // using authentic container extensions (.mp4 / .ts / .m4a / .aac) so Android Stagefright sniffs cleanly!
+        val videoExt = if (videoPlaylist.initMapUrl != null) "mp4" else "ts"
+        val assembledVideo = File(hlsDir, "assembled_video.$videoExt")
         concatenateHlsTaskFiles(hlsDir, videoTasks, assembledVideo)
 
         val assembledAudio = if (audioTasks.isNotEmpty()) {
-            File(hlsDir, "assembled_audio.stream").also {
+            val audioExt = if (audioPlaylist?.initMapUrl != null) "m4a" else "aac"
+            File(hlsDir, "assembled_audio.$audioExt").also {
                 concatenateHlsTaskFiles(hlsDir, audioTasks, it)
             }
         } else {
             null
         }
 
-        // Losslessly mux Video + Audio into fast-seeking MP4 container!
+        // Losslessly mux (or hardware-AAC-transcode audio when needed) into fast-seeking MP4 container!
         val remuxedOk = MediaRemuxer.remuxOrMergeToMp4(assembledVideo, assembledAudio, targetFile)
 
         val finalFile: File
@@ -899,15 +921,16 @@ class DownloadEngine private constructor(private val appContext: Context) {
         if (remuxedOk && targetFile.exists() && targetFile.length() > 0L) {
             finalFile = targetFile
             finalMime = "video/mp4"
-        } else if (videoPlaylist.initMapUrl != null) {
-            // Already valid fMP4 container
+        } else if (assembledAudio == null && videoPlaylist.initMapUrl != null) {
+            // Single-stream fMP4 where audio is already inside assembledVideo
             if (targetFile.exists()) targetFile.delete()
             if (!assembledVideo.renameTo(targetFile)) {
                 assembledVideo.copyTo(targetFile, overwrite = true)
             }
             finalFile = targetFile
             finalMime = "video/mp4"
-        } else {
+        } else if (assembledAudio == null) {
+            // Single-stream MPEG-TS where audio+video are already multiplexed inside .ts
             val fallbackTs = File(targetFile.parentFile, targetFile.nameWithoutExtension + ".ts")
             if (fallbackTs.exists()) fallbackTs.delete()
             if (!assembledVideo.renameTo(fallbackTs)) {
@@ -915,6 +938,8 @@ class DownloadEngine private constructor(private val appContext: Context) {
             }
             finalFile = fallbackTs
             finalMime = "video/mp2t"
+        } else {
+            throw IllegalStateException("ادغام صدا و تصویر این استریم انجام نشد؛ لطفاً مجدد امتحان کنید")
         }
 
         cleanupStagingArtifacts(targetFile, deleteTargetFile = false)
@@ -934,7 +959,7 @@ class DownloadEngine private constructor(private val appContext: Context) {
             errorMsg = ""
         )
         persistAndPublish(doneRecord)
-        onDownloadEventToast?.invoke("✅ دانلود استریم با صدا کامل شد: ${doneRecord.fileName}", true)
+        onDownloadEventToast?.invoke("✅ دانلود کامل شد: ${doneRecord.fileName}", true)
     }
 
     private fun buildHlsTasksForPlaylist(
@@ -942,8 +967,9 @@ class DownloadEngine private constructor(private val appContext: Context) {
         playlist: HlsPlaylistParser.ParsedMediaPlaylist,
         stripPackedId3: Boolean
     ): List<HlsSegmentTask> {
+        val isFmp4 = !playlist.initMapUrl.isNullOrBlank()
         val list = ArrayList<HlsSegmentTask>(playlist.segments.size + 1)
-        if (!playlist.initMapUrl.isNullOrBlank()) {
+        if (isFmp4 && playlist.initMapUrl != null) {
             list.add(
                 HlsSegmentTask(
                     fileName = "${prefix}_init.done",
@@ -952,7 +978,8 @@ class DownloadEngine private constructor(private val appContext: Context) {
                     byteRange = playlist.initMapByteRange,
                     aesKeyUrl = playlist.initMapAesKeyUrl,
                     aesIv = playlist.initMapAesIv,
-                    stripPackedAudioId3 = false
+                    stripPackedAudioId3 = false,
+                    isFmp4Fragment = false
                 )
             )
         }
@@ -965,7 +992,8 @@ class DownloadEngine private constructor(private val appContext: Context) {
                     byteRange = seg.byteRange,
                     aesKeyUrl = seg.aes128KeyUrl,
                     aesIv = seg.aes128Iv,
-                    stripPackedAudioId3 = stripPackedId3
+                    stripPackedAudioId3 = stripPackedId3,
+                    isFmp4Fragment = isFmp4
                 )
             )
         }

@@ -41,15 +41,21 @@ func ghMirrors(ownerRepo, branch, path string) []string {
 	}
 }
 
-const autoRetestInterval = 10 * time.Minute
+const autoRetestInterval = 20 * time.Minute
 
-// 50 verified, actively updated (Oct 2026) reputable multi-protocol proxy sources on GitHub
-// (VLESS XHTTP/Reality/WS/gRPC/TCP, VMess, Trojan, Shadowsocks, Base64 & raw subscriptions).
+// 50 verified, actively updated (Oct 31, 2026) multi-protocol proxy sources on GitHub
+// Tier 1 places automated Xray/Sing-box Iran-tested collectors first for instant high-uptime connect!
 var defaultFeedSources = []FeedSource{
+	{Name: "MorpheusIR", Mirrors: ghMirrors("morpheusadam/v2ray-config", "main", "subs/bundles/iran.txt")},
 	{Name: "RadikalTop", Mirrors: ghMirrors("0xRadikal/Free-v2ray-Configs", "main", "top100.txt")},
-	{Name: "FreeXray", Mirrors: ghMirrors("noahclanman/free-xray-gcp", "main", "output/fast/configs.txt")},
 	{Name: "F0rc3Run", Mirrors: ghMirrors("F0rc3Run/F0rc3Run", "main", "Best-Results/proxies.txt")},
 	{Name: "Bahemmat", Mirrors: ghMirrors("MohammadBahemmat/V2ray-Collector", "main", "Tested.txt")},
+	{Name: "Mehrtat", Mirrors: ghMirrors("mehrtat/vless-collector", "main", "vless.txt")},
+	{Name: "SorenaIR", Mirrors: ghMirrors("sorenadev-dev/v2rayCollector", "main", "sub/speed-shatel.txt")},
+	{Name: "Tahanian", Mirrors: ghMirrors("miladtahanian/Config-Collector", "main", "mixed_iran.txt")},
+	{Name: "YebekhePSG", Mirrors: ghMirrors("itsyebekhe/PSG", "main", "config.txt")},
+	{Name: "MorpheusLite", Mirrors: ghMirrors("morpheusadam/v2ray-config", "main", "subs/bundles/lite.txt")},
+	{Name: "FreeXray", Mirrors: ghMirrors("noahclanman/free-xray-gcp", "main", "output/fast/configs.txt")},
 	{Name: "iBoxz", Mirrors: ghMirrors("iboxz/free-v2ray-collector", "main", "main/mix.txt")},
 	{Name: "MahdiBland", Mirrors: ghMirrors("mahdibland/V2RayAggregator", "master", "Eternity.txt")},
 	{Name: "MatinSuper", Mirrors: ghMirrors("MatinGhanbari/v2ray-configs", "main", "subscriptions/v2ray/super-sub.txt")},
@@ -57,11 +63,7 @@ var defaultFeedSources = []FeedSource{
 	{Name: "Au1rxx", Mirrors: ghMirrors("Au1rxx/free-vpn-subscriptions", "main", "output/all-verified/v2ray-base64-0001.txt")},
 	{Name: "Igareck", Mirrors: ghMirrors("igareck/vpn-configs-for-russia", "main", "BLACK_SS+All_RUS.txt")},
 	{Name: "Alirewa", Mirrors: ghMirrors("Alirewa/V2ray-Configs", "main", "sub1.txt")},
-	{Name: "Morpheus", Mirrors: ghMirrors("morpheusadam/v2ray-config", "main", "subs/bundles/lite.txt")},
-	{Name: "Mehrtat", Mirrors: ghMirrors("mehrtat/vless-collector", "main", "sub.txt")},
 	{Name: "Jeddi", Mirrors: ghMirrors("AhmadJeddi/V2RayCFGDumper", "main", "sub.txt")},
-	{Name: "Tahanian", Mirrors: ghMirrors("miladtahanian/Config-Collector", "main", "mixed_iran.txt")},
-	{Name: "YebekhePSG", Mirrors: ghMirrors("itsyebekhe/PSG", "main", "config.txt")},
 	{Name: "DeltaSNI", Mirrors: ghMirrors("Delta-Kronecker/V2ray-Config", "main", "config/batches/sni_v2ray/batch_001.txt")},
 	{Name: "Bijandi", Mirrors: ghMirrors("amir-reza-bijandi/v2ray-configs", "main", "configs.txt")},
 	{Name: "RoosterKid", Mirrors: ghMirrors("roosterkid/openproxylist", "main", "V2RAY_RAW.txt")},
@@ -70,7 +72,6 @@ var defaultFeedSources = []FeedSource{
 	{Name: "NdsSpeed", Mirrors: ghMirrors("ndsphonemy/proxy-sub", "main", "speed.txt")},
 	{Name: "NoMoreWalls", Mirrors: ghMirrors("peasoft/NoMoreWalls", "master", "list_raw.txt")},
 	{Name: "Pawdroid", Mirrors: ghMirrors("Pawdroid/Free-servers", "main", "sub")},
-	{Name: "Ripao", Mirrors: ghMirrors("ripaojiedian/freenode", "main", "sub")},
 	{Name: "SnakePool", Mirrors: ghMirrors("snakem982/proxypool", "main", "source/v2ray-2.txt")},
 	{Name: "SoliSpirit", Mirrors: ghMirrors("SoliSpirit/v2ray-configs", "main", "Subscriptions/Sub1.txt")},
 	{Name: "Mahdi0024", Mirrors: ghMirrors("Mahdi0024/ProxyCollector", "master", "sub/proxies.txt")},
@@ -95,7 +96,6 @@ var defaultFeedSources = []FeedSource{
 	{Name: "SsbaxysGeo", Mirrors: ghMirrors("ssbaxys/v2ray-configs", "main", "geo-configs.txt")},
 	{Name: "CNTCafe", Mirrors: ghMirrors("CNT-Cafe/Public-Configs", "main", "test-configs.txt")},
 	{Name: "SkyVPN", Mirrors: ghMirrors("vxstream/SkyVPN", "main", "sub.txt")},
-	{Name: "MrPaster", Mirrors: ghMirrors("mrpaster12/config-proxy-collector", "main", "sub_raw.txt")},
 }
 
 type scoredNode struct {
@@ -480,7 +480,7 @@ func (p *NodePool) StartBackground() {
 			}
 		}
 
-		p.probeCandidatesConcurrent(existing, 20, 16)
+		p.probeCandidatesConcurrent(existing, 12, 12)
 		p.startupSelectPhase.Store(false)
 		p.mu.Lock()
 		p.sortReadyLocked()
@@ -493,8 +493,7 @@ func (p *NodePool) StartBackground() {
 		p.lastRetestUnix.Store(time.Now().Unix())
 		p.nextRetestUnix.Store(time.Now().Add(autoRetestInterval).Unix())
 
-		// Once at least one seed/tunnel node is up, ensure diverse live sources were collected
-		if p.ActiveSourcesCount() < 5 {
+		if p.ActiveSourcesCount() < 4 {
 			p.RefreshFromFeedsAsync()
 		}
 
@@ -506,13 +505,21 @@ func (p *NodePool) StartBackground() {
 			case <-ticker.C:
 				cycle++
 				p.nextRetestUnix.Store(time.Now().Add(autoRetestInterval).Unix())
+				// Zero battery drain when app is backgrounded / screen is off!
 				if !p.inForeground.Load() {
 					continue
 				}
-				if cycle%3 == 0 || p.ReadyCount() < 8 || p.ActiveSourcesCount() < 5 {
+				// Skip background probing completely when the locked server is already fast & healthy!
+				p.mu.RLock()
+				topHealthy := len(p.ready) >= 6 && p.ready[0].ConsecFailures == 0 && p.ready[0].AvgRTTMs > 0 && p.ready[0].AvgRTTMs < 360
+				p.mu.RUnlock()
+				if topHealthy && cycle%2 != 0 {
+					continue
+				}
+				if p.ReadyCount() < 5 || p.ActiveSourcesCount() < 4 {
 					p.RefreshFromFeedsAsync()
 				}
-				ctx, cancel := context.WithTimeout(context.Background(), 6500*time.Millisecond)
+				ctx, cancel := context.WithTimeout(context.Background(), 5500*time.Millisecond)
 				// Background check NEVER auto-switches active proxy; only suggests if a much better server exists!
 				_ = p.RunAutoRetest(ctx)
 				cancel()
@@ -1579,7 +1586,7 @@ func (p *NodePool) RefreshFromFeedsAsync() {
 			nodes []OutboundNode
 		}
 		ch := make(chan feedRes, len(sources))
-		sem := make(chan struct{}, 10) // Max 10 concurrent feed HTTP requests for low CPU/RAM
+		sem := make(chan struct{}, 6) // Low-power cap: max 6 concurrent feed HTTP requests for cool CPU & low RAM
 		var wg sync.WaitGroup
 
 		for idx, src := range sources {
@@ -1638,12 +1645,12 @@ func (p *NodePool) RefreshFromFeedsAsync() {
 				tail[i], tail[j] = tail[j], tail[i]
 			})
 		}
-		if len(candidates) > 120 {
-			candidates = candidates[:120]
+		if len(candidates) > 84 {
+			candidates = candidates[:84]
 		}
 
 		log.Printf("[gfproxy-pool] Fetched from %d/%d live sources; benchmarking %d interleaved nodes...", sourcesSucceeded, len(sources), len(candidates))
-		p.probeCandidatesConcurrent(candidates, 22, 24)
+		p.probeCandidatesConcurrent(candidates, 12, 14)
 		p.lastRetestUnix.Store(time.Now().Unix())
 		p.nextRetestUnix.Store(time.Now().Add(autoRetestInterval).Unix())
 		p.saveCachedNodes()
@@ -1918,27 +1925,35 @@ func (p *NodePool) testNodeEndToEndAndSpeed(parentCtx context.Context, node Outb
 
 	speedKbps := int64(0)
 	dlStart := time.Now()
-	_ = raw.SetDeadline(time.Now().Add(1100 * time.Millisecond))
+	_ = raw.SetDeadline(time.Now().Add(1400 * time.Millisecond))
 	reqPayload := []byte("GET /favicon.ico HTTP/1.1\r\nHost: www.youtube.com\r\nUser-Agent: Mozilla/5.0\r\nConnection: close\r\n\r\n")
-	if _, wErr := tlsConn.Write(reqPayload); wErr == nil {
-		totalBytes := 0
-		var chunk [4096]byte
-		for totalBytes < 32768 {
-			nr, rErr := tlsConn.Read(chunk[:])
-			if nr > 0 {
-				totalBytes += nr
-			}
-			if rErr != nil {
-				break
-			}
+	if _, wErr := tlsConn.Write(reqPayload); wErr != nil {
+		return 0, 0, false
+	}
+	totalBytes := 0
+	var chunk [4096]byte
+	for totalBytes < 32768 {
+		nr, rErr := tlsConn.Read(chunk[:])
+		if nr > 0 {
+			totalBytes += nr
 		}
-		dlMs := time.Since(dlStart).Milliseconds()
-		if totalBytes > 512 && dlMs > 0 {
-			speedKbps = (int64(totalBytes) * 8 * 1000) / dlMs
+		if rErr != nil {
+			break
 		}
+	}
+	// Reject broken/honeypot proxies that pass tiny 204 ping but drop immediately on second payload transfer!
+	if totalBytes < 128 {
+		return 0, 0, false
+	}
+	dlMs := time.Since(dlStart).Milliseconds()
+	if totalBytes > 512 && dlMs > 0 {
+		speedKbps = (int64(totalBytes) * 8 * 1000) / dlMs
 	}
 	if speedKbps <= 0 {
 		speedKbps = 640000 / (rtt + 40)
+	}
+	if speedKbps < 180 || rtt > 2600 {
+		return 0, 0, false
 	}
 
 	return rtt, speedKbps, true
