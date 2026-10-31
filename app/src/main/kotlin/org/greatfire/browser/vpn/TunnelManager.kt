@@ -190,7 +190,8 @@ class TunnelManager private constructor(private val appContext: Context) {
     private fun startWatchdogLoop() {
         scope.launch {
             while (true) {
-                delay(if (appInForeground) 12_000L else 45_000L)
+                // Ultra-low-power cadence: 25s in foreground, 120s deep-idle when app is backgrounded!
+                delay(if (appInForeground) 25_000L else 120_000L)
                 if (!appInForeground) continue
                 if (gatewayPort <= 0) {
                     ensureRunning()

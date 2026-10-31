@@ -80,6 +80,32 @@ object HlsPlaylistParser {
                 "${bandwidth / 1000L} Kbps"
             }
         }
+
+        fun readableCodecs(): String = describeCodecs(codecs)
+    }
+
+    fun describeCodecs(rawCodecs: String): String {
+        if (rawCodecs.isBlank()) return ""
+        val low = rawCodecs.lowercase(Locale.US)
+        val parts = ArrayList<String>(2)
+        when {
+            low.contains("av01") -> parts.add("AV1")
+            low.contains("hev") || low.contains("hvc") -> parts.add("HEVC/H.265")
+            low.contains("vp09") || low.contains("vp9") -> parts.add("VP9")
+            low.contains("avc") -> parts.add("H.264")
+            low.contains("mp4v") -> parts.add("MPEG-4")
+        }
+        when {
+            low.contains("ec-3") -> parts.add("E-AC3")
+            low.contains("ac-3") -> parts.add("AC3")
+            low.contains("opus") -> parts.add("Opus")
+            low.contains("vorbis") -> parts.add("Vorbis")
+            low.contains("flac") -> parts.add("FLAC")
+            low.contains("mp4a.40.5") || low.contains("mp4a.40.29") -> parts.add("HE-AAC")
+            low.contains("mp4a.40.34") || low.contains("mp3") -> parts.add("MP3")
+            low.contains("mp4a") -> parts.add("AAC")
+        }
+        return if (parts.isNotEmpty()) parts.joinToString(" + ") else rawCodecs.take(24)
     }
 
     data class MediaSegment(
@@ -165,24 +191,24 @@ object HlsPlaylistParser {
         requestedGroupId: String,
         codecs: String
     ): AudioRendition? {
-        val candidates = if (requestedGroupId.isNotBlank()) {
-            audioByGroup[requestedGroupId.lowercase(Locale.US)].orEmpty()
-        } else if (audioByGroup.size == 1 && !codecsContainAudio(codecs)) {
-            audioByGroup.values.first()
-        } else {
-            emptyList()
+        val hasExplicitVideoOnlyCodec = codecs.isNotBlank() && !codecsContainAudio(codecs)
+        val candidates = when {
+            requestedGroupId.isNotBlank() -> audioByGroup[requestedGroupId.lowercase(Locale.US)].orEmpty()
+            audioByGroup.size == 1 && !codecsContainAudio(codecs) -> audioByGroup.values.first()
+            hasExplicitVideoOnlyCodec && audioByGroup.isNotEmpty() -> audioByGroup.values.flatten()
+            else -> emptyList()
         }
         if (candidates.isEmpty()) return null
 
-        // If the chosen DEFAULT rendition has no URI, RFC 8216 states audio is already muxed in video!
+        // Prefer AAC/standard tracks over proprietary surround if multiple groups exist, then DEFAULT, then AUTOSELECT
         val sorted = candidates.sortedWith(
             compareByDescending<AudioRendition> { it.isDefault }
                 .thenByDescending { it.autoSelect }
+                .thenBy { it.channels > 2 } // Prefer universally playable stereo AAC over 6ch Dolby when ungrouped
                 .thenByDescending { it.channels }
         )
         val top = sorted.first()
         if (top.url.isNullOrBlank()) {
-            // Check if another rendition in the same group provides an explicit URI only when top wasn't muxed default
             return if (top.isDefault) null else sorted.firstOrNull { !it.url.isNullOrBlank() }
         }
         return top

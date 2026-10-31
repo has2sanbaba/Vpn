@@ -289,12 +289,108 @@ class HlsAndIdmSnifferTest {
         )
 
         val items = VideoStreamSniffer.getMediaForTab(tabId)
-        // Expected: 2 paired HLS variants (1080p + 720p, both carrying audioUrl!) + 1 direct CDN MP4 = 3 items
-        assertEquals(3, items.size)
+        // Expected: 2 paired HLS video variants (1080p + 720p) + 1 standalone M4A audio rendition + 1 direct CDN MP4 = 4 items
+        assertEquals(4, items.size)
         val topHls = items.first { it.height == 1080 && it.isHls }
         assertTrue(topHls.hasPairedAudio)
         assertEquals("https://hls.example.net/vod/99/aud/main.m3u8", topHls.audioUrl)
-        assertTrue(topHls.qualityLabel.contains("با صدا"))
+        assertTrue(topHls.audioStatusLabel().contains("با صدا"))
+        assertEquals("hls.example.net", topHls.sourceHost())
+        assertTrue(topHls.contentLengthBytes > 0L)
+        assertTrue(topHls.suggestedFileName().endsWith("_1080p.mp4"))
+
+        // Sibling audio auto-pairing rescues standalone video sub-playlist URLs too!
+        assertEquals(
+            "https://hls.example.net/vod/99/aud/main.m3u8",
+            VideoStreamSniffer.findSiblingAudioForVideoUrl(
+                "https://hls.example.net/vod/99/vid/720p.m3u8",
+                "https://cinema.example.net/watch/99"
+            )
+        )
+
+        VideoStreamSniffer.clearTab(tabId)
+    }
+
+    @Test
+    fun exposesAllNineQualitiesAndRichMetadataPlusFmp4AndTsNormalization() {
+        val tabId = "test_tab_v9_all_qualities"
+        VideoStreamSniffer.clearTab(tabId)
+
+        // 8 distinct video qualities (4K down to 144p, including two 1080p bitrates) + 1 separate audio track = 9 items!
+        val fullLadderMaster = """
+            #EXTM3U
+            #EXT-X-VERSION:6
+            #EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="aac-hi",NAME="Stereo",LANGUAGE="fa",DEFAULT=YES,CHANNELS="2",URI="audio/128k.m3u8"
+            #EXT-X-STREAM-INF:BANDWIDTH=14000000,RESOLUTION=3840x2160,FRAME-RATE=60.0,CODECS="hvc1.1.6.L150.90,mp4a.40.2",AUDIO="aac-hi"
+            v/2160p.m3u8
+            #EXT-X-STREAM-INF:BANDWIDTH=8000000,RESOLUTION=2560x1440,CODECS="avc1.640032,mp4a.40.2",AUDIO="aac-hi"
+            v/1440p.m3u8
+            #EXT-X-STREAM-INF:BANDWIDTH=5500000,RESOLUTION=1920x1080,FRAME-RATE=60.0,CODECS="avc1.64002a,mp4a.40.2",AUDIO="aac-hi"
+            v/1080p60.m3u8
+            #EXT-X-STREAM-INF:BANDWIDTH=3200000,RESOLUTION=1920x1080,FRAME-RATE=30.0,CODECS="avc1.640028,mp4a.40.2",AUDIO="aac-hi"
+            v/1080p30.m3u8
+            #EXT-X-STREAM-INF:BANDWIDTH=1900000,RESOLUTION=1280x720,CODECS="avc1.4d401f,mp4a.40.2",AUDIO="aac-hi"
+            v/720p.m3u8
+            #EXT-X-STREAM-INF:BANDWIDTH=1100000,RESOLUTION=854x480,CODECS="avc1.4d401e,mp4a.40.2",AUDIO="aac-hi"
+            v/480p.m3u8
+            #EXT-X-STREAM-INF:BANDWIDTH=650000,RESOLUTION=640x360,CODECS="avc1.42e01e,mp4a.40.2",AUDIO="aac-hi"
+            v/360p.m3u8
+            #EXT-X-STREAM-INF:BANDWIDTH=350000,RESOLUTION=426x240,CODECS="avc1.42e015,mp4a.40.2",AUDIO="aac-hi"
+            v/240p.m3u8
+            #EXT-X-STREAM-INF:BANDWIDTH=180000,RESOLUTION=256x144,CODECS="avc1.42e00c,mp4a.40.2",AUDIO="aac-hi"
+            v/144p.m3u8
+        """.trimIndent()
+
+        val masterUrl = "https://stream.cinema.ir/movies/hero/master.m3u8"
+        val masterItem = VideoStreamSniffer.recordCandidate(
+            tabId = tabId,
+            rawUrl = masterUrl,
+            pageUrl = "https://cinema.ir/movies/hero",
+            pageTitle = "قهرمان"
+        )!!
+        val variants = HlsPlaylistParser.parseMasterPlaylist(fullLadderMaster, masterUrl)
+        val audios = HlsPlaylistParser.parseAudioRenditions(fullLadderMaster, masterUrl)
+        assertEquals(9, variants.size)
+
+        VideoStreamSniffer.replaceMasterWithResolvedVariants(
+            tabId = tabId,
+            masterItem = masterItem,
+            variants = variants,
+            audioRenditions = audios,
+            probedDurationSec = 120,
+            probedSegmentCount = 30
+        )
+
+        val allItems = VideoStreamSniffer.getMediaForTab(tabId)
+        // ALL 9 video qualities + 1 standalone audio track = 10 items (ZERO 6-variant truncation!)
+        assertEquals(10, allItems.size)
+        val heights = allItems.filter { it.isHls }.map { it.height }
+        assertEquals(listOf(2160, 1440, 1080, 1080, 720, 480, 360, 240, 144), heights)
+
+        val item4k = allItems.first()
+        assertEquals("3840×2160 • 60fps", item4k.resolutionDetail())
+        assertEquals("HLS ➔ MP4 (HEVC/H.265 + AAC)", item4k.containerAndCodecsLabel())
+        assertEquals("14.0 Mbps", item4k.formattedBitrate())
+        assertEquals(30, item4k.segmentCount)
+        assertTrue(item4k.contentLengthBytes > 200_000_000L)
+
+        // Verify fMP4 styp/sidx stripping preserves moof + mdat boxes intact
+        val stypBox = byteArrayOf(0, 0, 0, 12, 's'.code.toByte(), 't'.code.toByte(), 'y'.code.toByte(), 'p'.code.toByte(), 1, 2, 3, 4)
+        val sidxBox = byteArrayOf(0, 0, 0, 12, 's'.code.toByte(), 'i'.code.toByte(), 'd'.code.toByte(), 'x'.code.toByte(), 5, 6, 7, 8)
+        val moofBox = byteArrayOf(0, 0, 0, 10, 'm'.code.toByte(), 'o'.code.toByte(), 'o'.code.toByte(), 'f'.code.toByte(), 9, 10)
+        val mdatBox = byteArrayOf(0, 0, 0, 10, 'm'.code.toByte(), 'd'.code.toByte(), 'a'.code.toByte(), 't'.code.toByte(), 11, 12)
+        val strippedFmp4 = MediaRemuxer.stripFmp4NonFragmentBoxes(stypBox + sidxBox + moofBox + mdatBox)
+        assertArrayEquals(moofBox + mdatBox, strippedFmp4)
+
+        // Verify MPEG-TS sync alignment strips fake PNG header before genuine 188-byte 0x47 packets
+        val fakePngPrefix = byteArrayOf(0x89.toByte(), 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A)
+        val tsPackets = ByteArray(188 * 3).apply {
+            this[0] = 0x47
+            this[188] = 0x47
+            this[376] = 0x47
+        }
+        val alignedTs = MediaRemuxer.alignToTsSyncPacket(fakePngPrefix + tsPackets)
+        assertArrayEquals(tsPackets, alignedTs)
 
         VideoStreamSniffer.clearTab(tabId)
     }

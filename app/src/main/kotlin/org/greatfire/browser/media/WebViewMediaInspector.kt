@@ -15,6 +15,8 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withPermit
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import org.greatfire.browser.vpn.TunnelManager
@@ -27,18 +29,13 @@ import java.util.WeakHashMap
 import java.util.concurrent.ConcurrentHashMap
 
 /**
- * Rebuilt v8.0 zero-leak bridge connecting Android [WebView] tabs to [VideoStreamSniffer]:
- * 1. Injects [VideoStreamSniffer.IDM_PAGE_SNIFFER_JS] at `DOCUMENT_START` across ALL frames
- *    (including cross-origin embedded player `<iframe>`s) via [WebViewCompat.addDocumentStartJavaScript]
- *    when supported, with automatic multi-stage fallback injection on older system WebViews.
- * 2. Exposes `window.DrIdmBridge` (`@JavascriptInterface`) across all frames to capture streams
- *    from `JSON.parse`, `fetch`, `XMLHttpRequest`, `<video>`, `JWPlayer`, `Video.js`, and Shadow DOM.
- * 3. Expands HLS Master Playlists via [VideoStreamSniffer.replaceMasterWithResolvedVariants],
- *    pairing every video variant with its `#EXT-X-MEDIA:TYPE=AUDIO` separate audio rendition and
- *    suppressing silent raw child sub-playlists.
- * 4. Runs lightweight 64-byte `Range: bytes=0-63` probes through the anti-censorship tunnel with
- *    browser `Referer`/`Origin`/`Cookie` headers to populate exact file sizes, upgrade extensionless
- *    `#EXTM3U` streams to HLS, and remove `text/html` or HTTP 404/410 false positives.
+ * v9.0 Zero-Leak, Battery-Optimized WebView Media Inspector & Multi-Quality Metadata Prober:
+ * 1. Injects [VideoStreamSniffer.IDM_PAGE_SNIFFER_JS] at `DOCUMENT_START` across all frames.
+ * 2. Receives live `#EXTM3U` bodies directly via `DrIdmBridge.onHlsManifestCaptured` so even
+ *    one-time-token / session-bound Master Playlists expand into ALL qualities (`144p`–`4K` + Audio)
+ *    with `#EXT-X-MEDIA:TYPE=AUDIO` paired immediately!
+ * 3. Bounded `Semaphore(3)` network prober calculates exact or sampled file sizes, filenames,
+ *    durations, segment counts, codecs, and bitrates for EVERY detected quality without heating the phone.
  */
 object WebViewMediaInspector {
 
@@ -47,6 +44,7 @@ object WebViewMediaInspector {
         "Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36"
 
     private val ioScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    private val probeSemaphore = Semaphore(3) // Battery & socket-friendly concurrency cap
     private val mainHandler = Handler(Looper.getMainLooper())
     private val attachedWebViews = Collections.synchronizedSet(
         Collections.newSetFromMap(WeakHashMap<WebView, Boolean>())
@@ -92,14 +90,14 @@ object WebViewMediaInspector {
         if (url.startsWith("http://", true) || url.startsWith("https://", true)) {
             VideoStreamSniffer.onMainFramePageStarted(tabKeyFor(webView), url)
             if (!docStartInstalledViews.contains(webView)) {
-                mainHandler.postDelayed({ evaluateSnifferBatch(webView, forceRescan = false, onDone = null) }, 180L)
+                mainHandler.postDelayed({ evaluateSnifferBatch(webView, forceRescan = false, onDone = null) }, 220L)
             }
         }
     }
 
     fun onProgressChanged(webView: WebView, newProgress: Int) {
         ensureAttached(webView)
-        if (!docStartInstalledViews.contains(webView) && (newProgress in 30..40 || newProgress in 72..82)) {
+        if (!docStartInstalledViews.contains(webView) && (newProgress in 35..42 || newProgress in 76..82)) {
             evaluateSnifferBatch(webView, forceRescan = false, onDone = null)
         } else if (newProgress == 100 && docStartInstalledViews.contains(webView)) {
             triggerLightweightDomScan(webView)
@@ -137,8 +135,7 @@ object WebViewMediaInspector {
 
         val headers = request.requestHeaders ?: emptyMap()
 
-        // Filter out MSE/DASH partial byte-range chunk fetches (e.g., Range: bytes=524288-1048575),
-        // while keeping whole-file open ranges (Range: bytes=0-)!
+        // Filter out MSE/DASH partial byte-range chunk fetches while keeping whole-file open ranges!
         val rangeHdr = headers["Range"] ?: headers["range"]
         if (!rangeHdr.isNullOrBlank()) {
             val r = rangeHdr.trim().lowercase(Locale.US)
@@ -169,10 +166,6 @@ object WebViewMediaInspector {
         }
     }
 
-    /**
-     * Actively rescans the current page DOM, Shadow DOMs, same-origin + cross-origin `<iframe>`s
-     * (`postMessage`), `performance.getEntriesByType('resource')`, and player APIs (`jwplayer`/`videojs`).
-     */
     fun rescanWebViewNow(
         webView: WebView?,
         onCompleted: (totalDetected: Int) -> Unit
@@ -274,6 +267,7 @@ object WebViewMediaInspector {
         val explicitMime = obj.optString("mime", "").trim()
         val contentDisposition = obj.optString("cd", "").trim()
         val qualityHint = obj.optString("quality", "").trim()
+        val bitrateHint = obj.optLong("bitrate", 0L)
         val mimeHint = explicitMime.ifEmpty {
             if (kind.equals("audio", true)) "audio/*" else ""
         }
@@ -287,10 +281,39 @@ object WebViewMediaInspector {
             height = obj.optInt("height", 0),
             durationSec = obj.optInt("duration", 0),
             contentDisposition = contentDisposition,
-            qualityHint = qualityHint
+            qualityHint = qualityHint,
+            bitrateHintBps = bitrateHint
         )
         if (detected != null) {
             scheduleStreamInspection(appContext, tabKey, detected, onVariantExpanded)
+        }
+    }
+
+    private fun ingestCapturedHlsManifest(
+        appContext: Context,
+        tabKey: String,
+        manifestUrl: String,
+        pageUrl: String,
+        pageTitle: String,
+        manifestBody: String
+    ) {
+        if (manifestUrl.isBlank() || !HlsPlaylistParser.looksLikeHlsManifest(manifestBody)) return
+        VideoStreamSniffer.cacheHlsManifest(manifestUrl, manifestBody)
+        val item = VideoStreamSniffer.recordCandidate(
+            tabId = tabKey,
+            rawUrl = manifestUrl,
+            pageUrl = pageUrl,
+            pageTitle = pageTitle,
+            mimeHint = "application/vnd.apple.mpegurl"
+        ) ?: return
+
+        ioScope.launch {
+            probeSemaphore.withPermit {
+                runCatching {
+                    val client = TunnelManager.getInstance(appContext).getTunneledOkHttpClient()
+                    processHlsManifestBody(client, tabKey, item, manifestUrl, manifestBody, null)
+                }
+            }
         }
     }
 
@@ -300,7 +323,7 @@ object WebViewMediaInspector {
         item: DetectedMediaItem,
         onUpdated: (() -> Unit)?
     ) {
-        if (item.isMasterVariant && item.contentLengthBytes > 0L) return
+        if (item.isMasterVariant && item.contentLengthBytes > 0L && item.durationSec > 0) return
         val key = "$tabKey|${item.kind}|${item.id}"
         if (!inspectedItems.add(key)) return
         if (inspectedItems.size > 512) {
@@ -308,14 +331,16 @@ object WebViewMediaInspector {
             inspectedItems.add(key)
         }
         ioScope.launch {
-            try {
-                val client = TunnelManager.getInstance(appContext).getTunneledOkHttpClient()
-                if (item.isHls) {
-                    inspectHlsPlaylist(client, tabKey, item, onUpdated)
-                } else {
-                    inspectDirectMedia(client, tabKey, item, onUpdated)
+            probeSemaphore.withPermit {
+                try {
+                    val client = TunnelManager.getInstance(appContext).getTunneledOkHttpClient()
+                    if (item.isHls || item.mimeType.contains("mpegurl", true)) {
+                        inspectHlsPlaylist(client, tabKey, item, onUpdated)
+                    } else {
+                        inspectDirectMedia(client, tabKey, item, onUpdated)
+                    }
+                } catch (_: Throwable) {
                 }
-            } catch (_: Throwable) {
             }
         }
     }
@@ -326,6 +351,13 @@ object WebViewMediaInspector {
         item: DetectedMediaItem,
         onUpdated: (() -> Unit)?
     ) {
+        // Check in-memory JS-captured manifest cache first (zero extra network hit!)
+        val cached = VideoStreamSniffer.getCachedHlsManifest(item.url)
+        if (!cached.isNullOrBlank() && HlsPlaylistParser.looksLikeHlsManifest(cached)) {
+            processHlsManifestBody(client, tabKey, item, item.url, cached, onUpdated)
+            return
+        }
+
         val reqBuilder = Request.Builder()
             .url(item.url)
             .get()
@@ -343,53 +375,160 @@ object WebViewMediaInspector {
             val finalUrl = resp.request.url.toString()
             val body = resp.body?.string().orEmpty()
             if (!HlsPlaylistParser.looksLikeHlsManifest(body)) return
+            VideoStreamSniffer.cacheHlsManifest(finalUrl, body)
+            processHlsManifestBody(client, tabKey, item, finalUrl, body, onUpdated)
+        }
+    }
 
-            if (HlsPlaylistParser.isMasterPlaylist(body)) {
-                val variants = HlsPlaylistParser.parseMasterPlaylist(body, finalUrl)
-                val audioRenditions = HlsPlaylistParser.parseAudioRenditions(body, finalUrl)
-                if (variants.isNotEmpty()) {
-                    var durationSec = item.durationSec
-                    if (durationSec <= 0) {
-                        val firstVideoVariant = variants.firstOrNull { !it.isAudioOnly } ?: variants.first()
-                        durationSec = probeVariantMediaDurationSec(client, firstVideoVariant.url, item.pageUrl)
-                    }
-                    val replaced = VideoStreamSniffer.replaceMasterWithResolvedVariants(
-                        tabId = tabKey,
-                        masterItem = item,
-                        variants = variants,
-                        audioRenditions = audioRenditions,
-                        probedDurationSec = durationSec
-                    )
-                    if (replaced && onUpdated != null) {
-                        mainHandler.post { onUpdated.invoke() }
+    private fun processHlsManifestBody(
+        client: OkHttpClient,
+        tabKey: String,
+        item: DetectedMediaItem,
+        manifestUrl: String,
+        body: String,
+        onUpdated: (() -> Unit)?
+    ) {
+        if (HlsPlaylistParser.isMasterPlaylist(body)) {
+            val variants = HlsPlaylistParser.parseMasterPlaylist(body, manifestUrl)
+            val audioRenditions = HlsPlaylistParser.parseAudioRenditions(body, manifestUrl)
+            if (variants.isNotEmpty() || audioRenditions.isNotEmpty()) {
+                var durationSec = item.durationSec
+                var segCount = 0
+                if (durationSec <= 0 && variants.isNotEmpty()) {
+                    val firstVideoVariant = variants.firstOrNull { !it.isAudioOnly } ?: variants.first()
+                    val probedPl = fetchAndParseMediaPlaylistQuietly(client, firstVideoVariant.url, item.pageUrl)
+                    if (probedPl != null) {
+                        durationSec = probedPl.totalDurationSec.toInt()
+                        segCount = probedPl.segments.size
                     }
                 }
-            } else {
-                val mediaPl = HlsPlaylistParser.parseMediaPlaylist(body, finalUrl)
-                if (mediaPl.isDrmOrEncrypted) {
-                    VideoStreamSniffer.removeInvalidCandidate(tabKey, item.id)
-                    return
-                }
-                val dur = mediaPl.totalDurationSec.toInt()
-                if (dur > 0) {
-                    VideoStreamSniffer.updateProbedMetadata(
-                        tabId = tabKey,
-                        itemId = item.id,
-                        durationSec = dur
-                    )
+                val replaced = VideoStreamSniffer.replaceMasterWithResolvedVariants(
+                    tabId = tabKey,
+                    masterItem = item,
+                    variants = variants,
+                    audioRenditions = audioRenditions,
+                    probedDurationSec = durationSec,
+                    probedSegmentCount = segCount
+                )
+                if (replaced) {
+                    // For any Master variant whose BANDWIDTH was omitted in #EXT-X-STREAM-INF, sample its media size!
+                    val tabItems = VideoStreamSniffer.getMediaForTab(tabKey)
+                    for (vItem in tabItems) {
+                        if (vItem.isMasterVariant && vItem.contentLengthBytes <= 0L) {
+                            populateMediaPlaylistSizeAndDuration(client, tabKey, vItem)
+                        }
+                    }
                     if (onUpdated != null) {
                         mainHandler.post { onUpdated.invoke() }
                     }
                 }
             }
+        } else {
+            val mediaPl = HlsPlaylistParser.parseMediaPlaylist(body, manifestUrl)
+            if (mediaPl.isDrmOrEncrypted) {
+                VideoStreamSniffer.removeInvalidCandidate(tabKey, item.id)
+                return
+            }
+            val dur = mediaPl.totalDurationSec.toInt()
+            val segCnt = mediaPl.segments.size
+            val sampledBytes = estimateMediaPlaylistBytes(client, mediaPl, item.pageUrl)
+            val estBitrate = if (sampledBytes > 0L && dur > 0) (sampledBytes * 8L) / dur else 0L
+            VideoStreamSniffer.updateProbedMetadata(
+                tabId = tabKey,
+                itemId = item.id,
+                contentLength = sampledBytes,
+                isEstimatedSize = true,
+                durationSec = dur,
+                segmentCount = segCnt,
+                bitrateBps = estBitrate
+            )
+            if (onUpdated != null) {
+                mainHandler.post { onUpdated.invoke() }
+            }
         }
     }
 
-    private fun probeVariantMediaDurationSec(
+    private fun populateMediaPlaylistSizeAndDuration(
+        client: OkHttpClient,
+        tabKey: String,
+        variantItem: DetectedMediaItem
+    ) {
+        val pl = fetchAndParseMediaPlaylistQuietly(client, variantItem.url, variantItem.pageUrl) ?: return
+        if (pl.isDrmOrEncrypted || pl.segments.isEmpty()) return
+        val dur = pl.totalDurationSec.toInt()
+        val sampledBytes = estimateMediaPlaylistBytes(client, pl, variantItem.pageUrl)
+        val audioExtra = if (variantItem.hasPairedAudio && dur > 0) (128_000L * dur) / 8L else 0L
+        val totalEst = if (sampledBytes > 0L) sampledBytes + audioExtra else -1L
+        val estBw = if (totalEst > 0L && dur > 0) (totalEst * 8L) / dur else variantItem.bitrateBps
+        VideoStreamSniffer.updateProbedMetadata(
+            tabId = tabKey,
+            itemId = variantItem.id,
+            contentLength = totalEst,
+            isEstimatedSize = true,
+            durationSec = dur,
+            segmentCount = pl.segments.size,
+            bitrateBps = estBw
+        )
+    }
+
+    private fun estimateMediaPlaylistBytes(
+        client: OkHttpClient,
+        pl: HlsPlaylistParser.ParsedMediaPlaylist,
+        pageUrl: String
+    ): Long {
+        if (pl.segments.isEmpty()) return -1L
+        // Fast exact path: if playlist uses #EXT-X-BYTERANGE on all segments, sum exact byte lengths!
+        if (pl.segments.all { it.byteRange != null }) {
+            val initBytes = pl.initMapByteRange?.length ?: 0L
+            return initBytes + pl.segments.sumOf { it.byteRange?.length ?: 0L }
+        }
+        // Sample middle segment via 1-byte Range: bytes=0-0 to read real Content-Range byte length!
+        val midSeg = pl.segments[pl.segments.size / 2]
+        val segBytes = probeSingleUrlTotalBytes(client, midSeg.url, pageUrl)
+        if (segBytes <= 0L) return -1L
+        return if (midSeg.durationSec > 0.2 && pl.totalDurationSec > 0.5) {
+            ((segBytes.toDouble() / midSeg.durationSec) * pl.totalDurationSec).toLong()
+        } else {
+            segBytes * pl.segments.size.toLong()
+        }
+    }
+
+    private fun probeSingleUrlTotalBytes(
+        client: OkHttpClient,
+        targetUrl: String,
+        pageUrl: String
+    ): Long {
+        return try {
+            val rb = Request.Builder()
+                .url(targetUrl)
+                .get()
+                .header("Range", "bytes=0-0")
+                .header("User-Agent", DEFAULT_UA)
+            attachBrowserContextHeaders(rb, targetUrl, pageUrl)
+            client.newCall(rb.build()).execute().use { resp ->
+                if (!resp.isSuccessful && resp.code != 206) return -1L
+                val cr = resp.header("Content-Range")
+                if (cr != null && cr.contains('/')) {
+                    cr.substringAfterLast('/').trim().toLongOrNull() ?: -1L
+                } else {
+                    resp.header("Content-Length")?.toLongOrNull() ?: -1L
+                }
+            }
+        } catch (_: Throwable) {
+            -1L
+        }
+    }
+
+    private fun fetchAndParseMediaPlaylistQuietly(
         client: OkHttpClient,
         variantUrl: String,
         pageUrl: String
-    ): Int {
+    ): HlsPlaylistParser.ParsedMediaPlaylist? {
+        VideoStreamSniffer.getCachedHlsManifest(variantUrl)?.let { cached ->
+            if (!HlsPlaylistParser.isMasterPlaylist(cached)) {
+                return HlsPlaylistParser.parseMediaPlaylist(cached, variantUrl)
+            }
+        }
         return try {
             val reqBuilder = Request.Builder()
                 .url(variantUrl)
@@ -397,16 +536,17 @@ object WebViewMediaInspector {
                 .header("User-Agent", DEFAULT_UA)
             attachBrowserContextHeaders(reqBuilder, variantUrl, pageUrl)
             client.newCall(reqBuilder.build()).execute().use { resp ->
-                if (!resp.isSuccessful) return 0
+                if (!resp.isSuccessful) return null
                 val finalUrl = resp.request.url.toString()
                 val text = resp.body?.string().orEmpty()
                 if (!HlsPlaylistParser.looksLikeHlsManifest(text) || HlsPlaylistParser.isMasterPlaylist(text)) {
-                    return 0
+                    return null
                 }
-                HlsPlaylistParser.parseMediaPlaylist(text, finalUrl).totalDurationSec.toInt()
+                VideoStreamSniffer.cacheHlsManifest(finalUrl, text)
+                HlsPlaylistParser.parseMediaPlaylist(text, finalUrl)
             }
         } catch (_: Throwable) {
-            0
+            null
         }
     }
 
@@ -437,7 +577,6 @@ object WebViewMediaInspector {
                 return
             }
 
-            // Peek up to 64 bytes to detect extensionless #EXTM3U manifests disguised as octet-stream/text!
             val peekBytes = try {
                 resp.body?.byteStream()?.use { ins ->
                     val buf = ByteArray(64)
@@ -472,13 +611,16 @@ object WebViewMediaInspector {
                 resp.header("Content-Length")?.toLongOrNull() ?: -1L
             }
             val cdName = extractFileNameHint(cd)
+            val estBw = if (total > 0L && item.durationSec > 0) (total * 8L) / item.durationSec else 0L
 
             VideoStreamSniffer.updateProbedMetadata(
                 tabId = tabKey,
                 itemId = item.id,
                 contentLength = total,
+                isEstimatedSize = false,
                 probedMime = ct,
-                fileNameHint = cdName
+                fileNameHint = cdName,
+                bitrateBps = estBw
             )
             if (onUpdated != null) {
                 mainHandler.post { onUpdated.invoke() }
@@ -554,6 +696,25 @@ object WebViewMediaInspector {
                     runCatching {
                         val obj = JSONObject(payloadJson)
                         recordJsonCandidate(appContext, tabKey, obj, fallbackUrl, fallbackTitle, null)
+                    }
+                }
+            }
+        }
+
+        @JavascriptInterface
+        fun onHlsManifestCaptured(payloadJson: String?) {
+            if (payloadJson.isNullOrBlank()) return
+            mainHandler.post {
+                val fallbackUrl = runCatching { webView.url.orEmpty() }.getOrDefault("")
+                val fallbackTitle = runCatching { webView.title.orEmpty() }.getOrDefault("")
+                ioScope.launch {
+                    runCatching {
+                        val obj = JSONObject(payloadJson)
+                        val mUrl = obj.optString("url", "").trim()
+                        val mBody = obj.optString("body", "")
+                        val pUrl = obj.optString("pageUrl", fallbackUrl).ifBlank { fallbackUrl }
+                        val pTitle = obj.optString("title", fallbackTitle).ifBlank { fallbackTitle }
+                        ingestCapturedHlsManifest(appContext, tabKey, mUrl, pUrl, pTitle, mBody)
                     }
                 }
             }

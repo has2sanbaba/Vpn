@@ -977,9 +977,13 @@ object DrBrowserSheets {
             layoutParams = LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.WRAP_CONTENT
-            ).apply { bottomMargin = dp(activity, 8) }
+            ).apply { bottomMargin = dp(activity, 9) }
         }
 
+        val topRow = LinearLayout(activity).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+        }
         val titleTv = TextView(activity).apply {
             text = media.title
             setTextColor(textPrimary)
@@ -987,19 +991,77 @@ object DrBrowserSheets {
             maxLines = 2
             ellipsize = TextUtils.TruncateAt.END
             setTypeface(typeface, Typeface.BOLD)
+            layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
         }
-        val metaParts = ArrayList<String>(4)
-        metaParts.add(media.formatBadge)
-        if (media.qualityLabel.isNotBlank()) metaParts.add(media.qualityLabel)
-        if (media.formattedDuration().isNotBlank()) metaParts.add(media.formattedDuration())
-        if (media.contentLengthBytes > 0) {
-            metaParts.add(Formatter.formatFileSize(activity, media.contentLengthBytes))
+        topRow.addView(titleTv)
+
+        val badgeLabel = media.qualityLabel.ifBlank { media.formatBadge }
+        val badgeColor = when {
+            media.height >= 1080 -> Color.parseColor("#1F6FEB")
+            media.height >= 720 -> Color.parseColor("#238636")
+            media.kind == org.greatfire.browser.media.SniffedMediaKind.AUDIO -> Color.parseColor("#8957E5")
+            else -> Color.parseColor("#388BFD")
         }
-        val metaTv = TextView(activity).apply {
-            text = metaParts.joinToString(" • ")
-            setTextColor(textSecondary)
+        val qualityPillTv = TextView(activity).apply {
+            text = badgeLabel
+            setTextColor(Color.WHITE)
+            textSize = 10.5f
+            setTypeface(typeface, Typeface.BOLD)
+            background = roundedBg(badgeColor, 7, activity)
+            setPadding(dp(activity, 8), dp(activity, 3), dp(activity, 8), dp(activity, 3))
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            ).apply { marginStart = dp(activity, 6) }
+        }
+        topRow.addView(qualityPillTv)
+
+        val fileNameStr = media.suggestedFileName()
+        val sizeStr = if (media.contentLengthBytes > 0L) {
+            val formatted = Formatter.formatFileSize(activity, media.contentLengthBytes)
+            if (media.isEstimatedSize) "~$formatted" else formatted
+        } else {
+            "در حال دریافت..."
+        }
+
+        // Line 1: File Size + Duration + Audio Status
+        val primaryMetaParts = ArrayList<String>(4)
+        primaryMetaParts.add("📦 حجم: $sizeStr")
+        if (media.formattedDuration().isNotBlank()) {
+            primaryMetaParts.add("⏱ زمان: ${media.formattedDuration()}")
+        }
+        primaryMetaParts.add(media.audioStatusLabel())
+
+        val primaryMetaTv = TextView(activity).apply {
+            text = primaryMetaParts.joinToString("  •  ")
+            setTextColor(Color.parseColor("#C9D1D9"))
             textSize = 11.5f
-            setPadding(0, dp(activity, 4), 0, dp(activity, 8))
+            setPadding(0, dp(activity, 5), 0, dp(activity, 2))
+        }
+
+        // Line 2: Exact Filename + Container/Codecs + Resolution + Bitrate + Segments + Source Host
+        val detailLines = StringBuilder()
+        detailLines.append("📄 نام فایل: ").append(fileNameStr)
+        detailLines.append("\n🎞 فرمت: ").append(media.containerAndCodecsLabel())
+        if (media.resolutionDetail().isNotBlank()) {
+            detailLines.append(" • ابعاد: ").append(media.resolutionDetail())
+        }
+        if (media.formattedBitrate().isNotBlank()) {
+            detailLines.append(" • بیت‌ریت: ").append(media.formattedBitrate())
+        }
+        if (media.segmentCount > 0) {
+            detailLines.append(" • ${media.segmentCount} قطعه")
+        }
+        if (media.sourceHost().isNotBlank()) {
+            detailLines.append(" • 🌐 ").append(media.sourceHost())
+        }
+
+        val detailMetaTv = TextView(activity).apply {
+            text = detailLines.toString()
+            setTextColor(textSecondary)
+            textSize = 11f
+            setLineSpacing(dp(activity, 2).toFloat(), 1.0f)
+            setPadding(0, 0, 0, dp(activity, 8))
         }
 
         val btnRow = LinearLayout(activity).apply {
@@ -1023,8 +1085,9 @@ object DrBrowserSheets {
         }
         val dlBtn = TextView(activity).apply {
             text = when {
+                media.kind == org.greatfire.browser.media.SniffedMediaKind.AUDIO -> "⬇ دانلود فایل صوتی"
                 media.hasPairedAudio -> "⬇ دانلود با صدا (MP4)"
-                media.isHls -> "⬇ دانلود و تبدیل به MP4"
+                media.isHls -> "⬇ دانلود با صدا (MP4)"
                 else -> "⬇ دانلود پرسرعت"
             }
             setTextColor(Color.WHITE)
@@ -1038,8 +1101,9 @@ object DrBrowserSheets {
         btnRow.addView(spacer)
         btnRow.addView(dlBtn)
 
-        card.addView(titleTv)
-        card.addView(metaTv)
+        card.addView(topRow)
+        card.addView(primaryMetaTv)
+        card.addView(detailMetaTv)
         card.addView(btnRow)
         return card
     }

@@ -397,24 +397,35 @@ func (g *GatewayServer) forwardSmartHTTP(ctx context.Context, req *http.Request)
 	return g.router.ForwardPlainHTTP(ctx, req)
 }
 
+var relayBufPool = sync.Pool{
+	New: func() any {
+		b := make([]byte, 32*1024)
+		return &b
+	},
+}
+
 func (g *GatewayServer) pipeBidirectional(client net.Conn, clientReader io.Reader, remote net.Conn) {
 	var wg sync.WaitGroup
 	wg.Add(2)
 
-	// Client -> Remote (Upload)
+	// Client -> Remote (Upload) using pooled 32KB buffer to eliminate GC churn & save battery
 	go func() {
 		defer wg.Done()
-		n, _ := io.Copy(remote, clientReader)
+		bufPtr := relayBufPool.Get().(*[]byte)
+		defer relayBufPool.Put(bufPtr)
+		n, _ := io.CopyBuffer(remote, clientReader, *bufPtr)
 		if n > 0 {
 			g.BytesUp.Add(uint64(n))
 		}
 		closeHalfWrite(remote)
 	}()
 
-	// Remote -> Client (Download)
+	// Remote -> Client (Download) using pooled 32KB buffer
 	go func() {
 		defer wg.Done()
-		n, _ := io.Copy(client, remote)
+		bufPtr := relayBufPool.Get().(*[]byte)
+		defer relayBufPool.Put(bufPtr)
+		n, _ := io.CopyBuffer(client, remote, *bufPtr)
 		if n > 0 {
 			g.BytesDown.Add(uint64(n))
 		}
